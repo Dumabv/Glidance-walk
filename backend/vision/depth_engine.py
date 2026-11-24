@@ -42,7 +42,8 @@ class DepthEngine:
         from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
         self._torch = torch
-        if torch.backends.mps.is_available():
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is not None and mps_backend.is_available():
             self.device = "mps"
         elif torch.cuda.is_available():
             self.device = "cuda"

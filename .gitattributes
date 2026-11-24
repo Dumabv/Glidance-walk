@@ -1,0 +1,6 @@
+# Normalize line endings across macOS (M4) and Windows teammates
+* text=auto eol=lf
+
+*.jpg binary
+*.png binary
+*.webp binary
