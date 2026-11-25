@@ -2120,6 +2120,7 @@ mod tests {
         let fs = 48_000.0f32;
         let mut st = SonarState::new();
         st.init(fs);
+        let tx = st.tx_chirp;
         let mut hp = [0.0f32; SONAR_FRAME_LEN];
 
         let synth_frame = |seed: u32, tau0: usize, glass_dist_m: Option<f32>| -> [f32; SONAR_FRAME_LEN] {
@@ -2137,15 +2138,15 @@ mod tests {
                 let base = tau0 + p * SONAR_PERIOD;
                 for n in 0..SONAR_CHIRP_LEN {
                     if base + n < SONAR_FRAME_LEN {
-                        buf[base + n] += 1.0 * st.tx_chirp[n];
+                        buf[base + n] += 1.0 * tx[n];
                     }
                     if base + 95 + n < SONAR_FRAME_LEN {
-                        buf[base + 95 + n] += 0.14 * st.tx_chirp[n];
+                        buf[base + 95 + n] += 0.14 * tx[n];
                     }
                     if let Some(d_m) = glass_dist_m {
                         let lag = (((d_m - SONAR_DIRECT_OFFSET_M) * 2.0 * fs) / SONAR_SPEED_OF_SOUND) as usize;
                         if base + lag + n < SONAR_FRAME_LEN {
-                            buf[base + lag + n] += 0.075 * st.tx_chirp[n];
+                            buf[base + lag + n] += 0.075 * tx[n];
                         }
                     }
                 }
