@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 Severity = Literal["clear", "caution", "danger"]
+Corridor = Literal["left", "center", "right"]
 SteeringAction = Literal["CLEAR", "VEER_LEFT", "VEER_RIGHT", "STOP", "CURB_DROP"]
 SampleLabel = Literal[
     "clear",
@@ -30,9 +31,19 @@ class CurbMetrics(BaseModel):
     stairs_likely: bool = False
 
 
+class DetectedObject(BaseModel):
+    label: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    distance_m: float = Field(ge=0.2, le=20.0)
+    corridor: Corridor
+    bbox_norm: list[float] = Field(min_length=4, max_length=4)
+    severity: Severity
+
+
 class LatencyBreakdown(BaseModel):
     decode_ms: float
     inference_ms: float
+    yolo_ms: float = 0.0
     hazard_ms: float
     server_total_ms: float
 
@@ -48,6 +59,7 @@ class GuidancePayload(BaseModel):
     center: ZoneMetrics
     right: ZoneMetrics
     curb: CurbMetrics
+    objects: list[DetectedObject] = Field(default_factory=list)
     latency: LatencyBreakdown
     device: str
     model_name: str

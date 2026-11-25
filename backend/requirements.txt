@@ -7,6 +7,7 @@ opencv-python-headless>=4.10.0
 onnxruntime>=1.19.0
 httpx>=0.27.0
 pytest>=8.3.0
-# Optional GPU/MPS PyTorch backend (auto-detected if installed alongside onnxruntime):
+# Optional GPU/MPS PyTorch + YOLOv8n semantic detector (auto-detected if installed):
 # torch>=2.4.0
 # transformers>=4.46.0
+# ultralytics>=8.3.0

@@ -1,4 +1,5 @@
 export type Severity = 'clear' | 'caution' | 'danger';
+export type Corridor = 'left' | 'center' | 'right';
 
 export type SteeringAction =
   | 'CLEAR'
@@ -31,9 +32,19 @@ export interface CurbMetrics {
   stairs_likely?: boolean;
 }
 
+export interface DetectedObject {
+  label: string;
+  confidence: number;
+  distance_m: number;
+  corridor: Corridor;
+  bbox_norm: [number, number, number, number];
+  severity: Severity;
+}
+
 export interface LatencyBreakdown {
   decode_ms: number;
   inference_ms: number;
+  yolo_ms?: number;
   hazard_ms: number;
   server_total_ms: number;
 }
@@ -49,6 +60,7 @@ export interface GuidancePayload {
   center: ZoneMetrics;
   right: ZoneMetrics;
   curb: CurbMetrics;
+  objects?: DetectedObject[];
   latency: LatencyBreakdown;
   device: string;
   model_name: string;

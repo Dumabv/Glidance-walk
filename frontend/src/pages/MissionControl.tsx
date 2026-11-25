@@ -243,12 +243,12 @@ export function MissionControl() {
         <section className="flex flex-col rounded-2xl border border-slate-800 bg-slate-900/70 p-4 lg:col-span-4">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-100">
-              2. Depth-Anything-V2 Heatmap
+              2. Metric Depth + YOLOv8n Overlay
             </h2>
             <span className="text-xs text-slate-400">
               {guidance
-                ? `${guidance.latency.inference_ms.toFixed(1)} ms infer`
-                : 'Inferno scale'}
+                ? `${guidance.latency.inference_ms.toFixed(0)}ms depth${guidance.latency.yolo_ms ? ` · ${guidance.latency.yolo_ms.toFixed(0)}ms YOLO` : ''}`
+                : 'Inferno + Boxes'}
             </span>
           </div>
 
@@ -314,6 +314,20 @@ export function MissionControl() {
             <p className="mt-1.5 text-sm font-semibold text-white">
               {guidance?.spoken_cue ?? 'Awaiting first frame...'}
             </p>
+            {guidance?.objects && guidance.objects.length > 0 && (
+              <ul className="mt-2 flex flex-wrap gap-1.5">
+                {guidance.objects.map((obj, idx) => (
+                  <li
+                    key={`${obj.label}-${idx}`}
+                    className={`rounded-md border px-2 py-0.5 text-[11px] font-bold uppercase ${
+                      SEVERITY_BADGE[obj.severity]
+                    }`}
+                  >
+                    {obj.label} · {obj.distance_m.toFixed(1)}m · {obj.corridor}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </section>
       </div>

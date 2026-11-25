@@ -13,3 +13,5 @@ frontend/dist/
 *.tsbuildinfo
 .DS_Store
 *.log
+*.pt
+backend/data/models/

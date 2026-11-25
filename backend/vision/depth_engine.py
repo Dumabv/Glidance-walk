@@ -41,7 +41,7 @@ def _register_nvidia_cuda_dlls() -> None:
 
 DEFAULT_MODEL_ID = os.getenv(
     "GLIDANCE_DEPTH_MODEL",
-    "depth-anything/Depth-Anything-V2-Small-hf",
+    "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
 )
 ONNX_MODELS = {
     "small": (
@@ -142,6 +142,7 @@ class DepthPrediction:
     luma_mean: float
     luma_std: float
     inference_ms: float
+    depth_meters: np.ndarray | None = None
 
 
 def _align_to_patch14(h: int, w: int, max_side: int) -> tuple[int, int]:
@@ -212,9 +213,14 @@ class DepthEngine:
 
                 dtype = torch.float16 if self._use_fp16 else torch.float32
                 self._torch = torch
-                self._model = AutoModelForDepthEstimation.from_pretrained(
-                    self.model_id, torch_dtype=dtype
-                )
+                try:
+                    self._model = AutoModelForDepthEstimation.from_pretrained(
+                        self.model_id, dtype=dtype
+                    )
+                except TypeError:
+                    self._model = AutoModelForDepthEstimation.from_pretrained(
+                        self.model_id, torch_dtype=dtype
+                    )
                 self._model.to(device=self.device, dtype=dtype)
                 self._model.eval()
                 self.runtime = "torch-fp16" if self._use_fp16 else "torch-fp32"
@@ -288,6 +294,7 @@ class DepthEngine:
                 self._ort_input_name = inp0.name
                 self._ort_input_fp16 = "float16" in str(inp0.type).lower()
                 self.model_id = display_name
+                self._is_metric_model = "metric" in display_name.lower()
                 self.runtime = f"onnx-{tier}"
                 self.max_input_width = min(self.max_input_width, tier_max_w)
 
@@ -445,12 +452,14 @@ class DepthEngine:
             p2, p98 = [float(x) for x in np.percentile(gray[::2, ::2], [2.0, 98.0])]
             spread_milli = int(np.clip((p98 - p2) * 1000.0, 0.0, 1000.0))
             closeness = np.clip(gray, 0.0, 1.0)
+            depth_meters = (4.80 - closeness * 4.45).astype(np.float32)
             return DepthPrediction(
                 closeness=closeness,
                 raw_spread_milli=max(spread_milli, 200) if spread_milli > 5 else 200,
                 luma_mean=luma_mean,
                 luma_std=luma_std,
                 inference_ms=(time.perf_counter() - t0) * 1000.0,
+                depth_meters=depth_meters,
             )
 
         nh, nw = _align_to_patch14(h, w, self.max_input_width)
@@ -485,7 +494,18 @@ class DepthEngine:
             if raw_depth.shape != (h, w):
                 raw_depth = cv2.resize(raw_depth, (w, h), interpolation=cv2.INTER_LINEAR)
 
+            if self._is_metric_model:
+                depth_meters = np.clip(
+                    np.nan_to_num(raw_depth, nan=0.35, posinf=12.0, neginf=0.35),
+                    0.25,
+                    12.0,
+                ).astype(np.float32)
+            else:
+                depth_meters = None
+
             closeness, spread_milli = self._normalize_depth_fast(raw_depth)
+            if depth_meters is None:
+                depth_meters = (4.80 - closeness * 4.45).astype(np.float32)
 
         inference_ms = (time.perf_counter() - t0) * 1000.0
         return DepthPrediction(
@@ -494,6 +514,7 @@ class DepthEngine:
             luma_mean=luma_mean,
             luma_std=luma_std,
             inference_ms=inference_ms,
+            depth_meters=depth_meters,
         )
 
     def predict_pil(self, image: Image.Image) -> tuple[np.ndarray, float]:
@@ -584,6 +605,35 @@ def render_depth_overlay_jpeg(
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.48,
                 (255, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+
+        # Draw YOLOv8n + Metric Depth labeled bounding boxes
+        for obj in getattr(guidance, "objects", None) or []:
+            bx1 = int(obj.bbox_norm[0] * w)
+            by1 = int(obj.bbox_norm[1] * h)
+            bx2 = int(obj.bbox_norm[2] * w)
+            by2 = int(obj.bbox_norm[3] * h)
+            box_color = severity_colors[obj.severity]
+            cv2.rectangle(colored, (bx1, by1), (bx2, by2), box_color, 2)
+            tag = f"{obj.label.upper()} {obj.distance_m:.1f}m"
+            (tw, th), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+            ty = max(th + 4, by1)
+            cv2.rectangle(
+                colored,
+                (bx1, ty - th - 4),
+                (min(w - 1, bx1 + tw + 6), ty),
+                box_color,
+                -1,
+            )
+            cv2.putText(
+                colored,
+                tag,
+                (bx1 + 3, ty - 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (10, 10, 10),
                 1,
                 cv2.LINE_AA,
             )
