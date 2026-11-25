@@ -116,7 +116,7 @@ export function MobileWalker() {
   const [sonarOn, setSonarOn] = useState(true);
   const [voiceOn, setVoiceOn] = useState(true);
   const [guidanceProfile, setGuidanceProfile] = useState<GuidanceProfile>('smart_calm');
-  const [voiceLang, setVoiceLang] = useState<VoiceLang>('ru');
+  const [voiceLang, setVoiceLang] = useState<VoiceLang>('en');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);

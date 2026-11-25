@@ -92,7 +92,7 @@ export class SpatialAudioEngine {
   private profile: GuidanceProfile = 'smart_calm';
   private sonarEnabled = true;
   private voiceEnabled = true;
-  private voiceLang: VoiceLang = 'ru';
+  private voiceLang: VoiceLang = 'en';
 
   private lastPingAt = 0;
   private lastRank = 0;
