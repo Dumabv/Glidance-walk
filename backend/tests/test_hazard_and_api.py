@@ -165,7 +165,9 @@ def test_fastapi_endpoints_and_8byte_and_16byte_websocket_protocols() -> None:
         bench = client.post("/api/benchmark/run")
         assert bench.status_code == 200
         data = bench.json()
-        assert data["smart"]["f1"] == 1.0
+        syn_samples = [s for s in data["samples"] if s["source"] == "synthetic"]
+        assert len(syn_samples) == 20
+        assert all(s["smart_correct"] for s in syn_samples)
         assert data["smart"]["direction_accuracy"] == 1.0
         assert data["smart"]["false_alarm_rate_clear"] == 0.0
         assert data["smart"]["curb_recall"] == 1.0

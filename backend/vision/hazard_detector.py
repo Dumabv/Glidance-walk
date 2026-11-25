@@ -442,7 +442,11 @@ class GroundAwareHazardDetector:
         s_tb = (q_bot - q_top) / max(0.25, t_bot - t_top)
         s_mb = (q_bot - q_mid) / max(0.15, t_bot - t_mid)
         s_tm = (q_mid - q_top) / max(0.15, t_mid - t_top)
-        obs_slope = float(np.median([s_tb, s_mb, s_tm]))
+        obs_slope = (
+            float(s_mb)
+            if (q_top <= 0.05 and q_mid <= 0.08 and q_bot >= 0.22)
+            else float(np.median([s_tb, s_mb, s_tm]))
+        )
         obs_intercept = q_bot - obs_slope * t_bot
 
         imu_shift = (
@@ -456,11 +460,11 @@ class GroundAwareHazardDetector:
             else (0.20 + max(0.0, imu_shift))
         )
         min_slope = 0.32 if (has_live_imu and 12.0 < pitch_deg < 55.0) else 0.44
-        floor_slope = float(np.clip(obs_slope, min_slope, 0.88))
-        floor_intercept = float(np.clip(obs_intercept, 0.04, max_intercept))
+        floor_slope = float(np.clip(obs_slope, min_slope, 1.45))
+        floor_intercept = float(np.clip(obs_intercept, -0.65, max_intercept))
 
         y_norm = np.linspace(0.0, 1.0, roi_h, dtype=np.float32)
-        prior = floor_intercept + floor_slope * y_norm
+        prior = np.maximum(0.04, floor_intercept + floor_slope * y_norm)
         expected_floor = np.minimum(np.maximum(prior, row_q20 * 0.86), prior + 0.06)
 
         allow_overhang = (not has_live_imu) or (74.0 <= pitch_deg <= 112.0)

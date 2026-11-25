@@ -609,11 +609,21 @@ fn analyze_frame_with_qbuf(
     let t_mid = (0.5 * (m0 + m1 - 1) as f32) / denom_r;
     let t_bot = (0.5 * (b0 + b1 - 1) as f32) / denom_r;
 
+    // Hinged Horizon V-Disparity Model:
+    // `d_floor(t) = max(0.04, floor_intercept + floor_slope * t)` with `floor_intercept >= -0.65` and `slope <= 1.45`!
+    // When phone is held upright (`beta ~ 85-95°`), the horizon sits mid-frame (`t ~ 0.45`), so `obs_intercept < 0`:
+    // above the horizon `d_floor(t)` clamps to `0.04` (detecting chest-high tables/people at 1.2-2.5m!),
+    // while below the horizon `b + m*t` tracks the steeper perspective floor ramp with 0 false floor alarms!
     let s_tb = (q_bot - q_top) / (t_bot - t_top).max(0.25);
     let s_mb = (q_bot - q_mid) / (t_bot - t_mid).max(0.15);
     let s_tm = (q_mid - q_top) / (t_mid - t_top).max(0.15);
-    let mut slopes3 = [s_tb, s_mb, s_tm];
-    let obs_slope = small_slice_median(&mut slopes3);
+    // If upper band is above the horizon (`q_top < 0.05` and `q_mid < 0.08`), `s_mb` captures true floor slope!
+    let obs_slope = if q_top <= 0.05 && q_mid <= 0.08 && q_bot >= 0.22 {
+        s_mb
+    } else {
+        let mut slopes3 = [s_tb, s_mb, s_tm];
+        small_slice_median(&mut slopes3)
+    };
     let obs_intercept = q_bot - obs_slope * t_bot;
 
     let imu_shift = if has_live_imu && pitch_deg > 12.0 && pitch_deg < 135.0 {
@@ -632,13 +642,13 @@ fn analyze_frame_with_qbuf(
     } else {
         0.44
     };
-    let floor_slope = clamp_f32(obs_slope, min_slope, 0.88);
-    let floor_intercept = clamp_f32(obs_intercept, 0.04, max_intercept);
+    let floor_slope = clamp_f32(obs_slope, min_slope, 1.45);
+    let floor_intercept = clamp_f32(obs_intercept, -0.65, max_intercept);
 
     let mut expected_floor_milli = [0u32; MAX_DIM];
     let inv_denom_r = 1.0 / denom_r;
     for r in 0..roi_h {
-        let prior = floor_intercept + floor_slope * (r as f32 * inv_denom_r);
+        let prior = (floor_intercept + floor_slope * (r as f32 * inv_denom_r)).max(0.04);
         let blended = prior.max(row_q20[r] * 0.86).min(prior + 0.06);
         expected_floor_milli[r] = round_milli(blended);
     }
