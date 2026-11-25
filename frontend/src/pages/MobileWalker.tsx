@@ -862,6 +862,18 @@ export function MobileWalker() {
             ? 'Connection or camera interrupted — stop walking.'
             : guidance?.spoken_cue ?? 'Tap Start Walking Stream to engage rear camera.'}
         </span>
+        {!signalLost && guidance?.objects && guidance.objects.length > 0 && (
+          <span className="mt-2 flex flex-wrap justify-center gap-1.5">
+            {guidance.objects.slice(0, 3).map((obj, idx) => (
+              <span
+                key={`${obj.label}-${idx}`}
+                className="rounded-full bg-slate-950/60 px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide"
+              >
+                {obj.label} · {obj.distance_m.toFixed(1)}m
+              </span>
+            ))}
+          </span>
+        )}
       </button>
 
       {/* Primary Action Button + Palm-Safe Eyes-Free Lock */}

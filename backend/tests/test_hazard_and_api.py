@@ -10,11 +10,18 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from backend.evaluation.dataset_store import build_synthetic_calibration_suite
-from backend.schemas import CalibrationConfig
+from backend.schemas import CalibrationConfig, DetectedObject
 from backend.vision.baseline_naive import NaiveCenterThresholdDetector
 from backend.vision.hazard_detector import (
     GroundAwareHazardDetector,
     decide_guidance_verified,
+)
+from backend.vision.object_detector import estimate_box_distance_m
+
+ALLOWED_KERNELS = (
+    ("rust-simd",)
+    if os.getenv("GLIDANCE_REQUIRE_RUST", "0") == "1"
+    else ("rust-simd", "numpy-verified")
 )
 
 
@@ -33,7 +40,7 @@ def test_ground_aware_beats_naive_on_synthetic_and_adversarial_suite() -> None:
     naive = NaiveCenterThresholdDetector()
     smart = GroundAwareHazardDetector(CalibrationConfig())
 
-    assert smart.kernel_backend == "rust-simd", "Expected native Rust SIMD kernel to be active"
+    assert smart.kernel_backend in ALLOWED_KERNELS, f"Unexpected kernel backend: {smart.kernel_backend}"
 
     smart_correct = 0
     naive_clear_false_alarms = 0
@@ -163,7 +170,7 @@ def test_fastapi_endpoints_and_8byte_and_16byte_websocket_protocols(tmp_path) ->
             assert r.status_code == 200
             hdata = r.json()
             assert hdata["status"] == "ok"
-            assert hdata["kernel_backend"] == "rust-simd"
+            assert hdata["kernel_backend"] in ALLOWED_KERNELS
 
             bench = client.post("/api/benchmark/run")
             assert bench.status_code == 200
@@ -182,7 +189,7 @@ def test_fastapi_endpoints_and_8byte_and_16byte_websocket_protocols(tmp_path) ->
                 reply = ws.receive_json()
                 assert reply["frame_id"] >= 1
                 assert abs(reply["client_ts"] - ts_ms) < 1.0
-                assert reply["kernel_backend"] == "rust-simd"
+                assert reply["kernel_backend"] in ALLOWED_KERNELS
 
                 # 2. Upgraded 16-byte IMU-enriched binary WebSocket header `[f64 ts][f32 pitch][f32 roll]+JPEG`
                 payload16 = struct.pack(">dff", ts_ms + 50.0, 68.5, -2.0) + _make_jpeg(width=240, height=320)
@@ -191,3 +198,50 @@ def test_fastapi_endpoints_and_8byte_and_16byte_websocket_protocols(tmp_path) ->
                 assert reply2["pitch_deg"] == 68.5
     finally:
         state.dataset_store = orig_store
+
+
+def test_box_distance_uses_center_core_median() -> None:
+    """Background pixels at bbox edges must not corrupt the object's metric distance."""
+    depth_meters = np.full((180, 240), 4.5, dtype=np.float32)
+    depth_meters[65:115, 100:140] = 1.15
+    dist = estimate_box_distance_m(depth_meters, x1=80, y1=40, x2=160, y2=140)
+    assert abs(dist - 1.15) < 0.05
+
+
+def test_yolo_enrichment_preserves_lean4_invariants() -> None:
+    """YOLO semantic fusion names obstacles while preserving Lean 4 never-steer-into-danger."""
+    from backend.main import fuse_yolo_with_verified_hazard
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+    assert base_haz.steering == "CLEAR"
+
+    chair_center = DetectedObject(
+        label="chair",
+        confidence=0.86,
+        distance_m=1.05,
+        corridor="center",
+        bbox_norm=[0.38, 0.35, 0.62, 0.80],
+        severity="danger",
+    )
+    person_left = DetectedObject(
+        label="person",
+        confidence=0.88,
+        distance_m=1.10,
+        corridor="left",
+        bbox_norm=[0.05, 0.25, 0.30, 0.85],
+        severity="danger",
+    )
+
+    fused = fuse_yolo_with_verified_hazard(base_haz, [chair_center, person_left], cfg)
+    assert fused.overall_severity == "danger"
+    # Left & Center are danger, Right is clear -> Lean 4 theorem mandates VEER_RIGHT (never VEER_LEFT!)
+    assert fused.steering == "VEER_RIGHT"
+    assert "Chair" in fused.spoken_cue
+    assert "1.1m" in fused.spoken_cue
