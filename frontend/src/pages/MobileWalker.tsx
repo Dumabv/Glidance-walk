@@ -118,6 +118,7 @@ export function MobileWalker() {
   const [execMode, setExecMode] = useState<ExecutionMode>('auto');
   const [streaming, setStreaming] = useState(false);
   const [facingMode, setFacingMode] = useState<CameraFacingMode>('environment');
+  const [cameraDeviceLabel, setCameraDeviceLabel] = useState<string | null>(null);
   const [switchingCamera, setSwitchingCamera] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const [workerStatus, setWorkerStatus] = useState<string>('idle');
@@ -363,7 +364,13 @@ export function MobileWalker() {
     streamRef.current = stream;
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
-      await videoRef.current.play();
+      try {
+        await videoRef.current.play();
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          throw err;
+        }
+      }
     }
   }, []);
 
@@ -397,6 +404,7 @@ export function MobileWalker() {
     encodingRef.current = false;
     switchingCameraRef.current = false;
     setSwitchingCamera(false);
+    setCameraDeviceLabel(null);
     setStreaming(false);
     setWsConnected(false);
     setSignalLost(false);
@@ -649,14 +657,19 @@ export function MobileWalker() {
     const activeSessionId = ++sessionIdRef.current;
 
     try {
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
       stopMediaStream(streamRef.current);
       streamRef.current = null;
-      const { stream, actualFacingMode } = await acquireCameraStream(facingMode);
+      const { stream, actualFacingMode, deviceLabel, usedFallback } =
+        await acquireCameraStream(facingMode);
       if (sessionIdRef.current !== activeSessionId) {
         stopMediaStream(stream);
         return;
       }
       setFacingMode(actualFacingMode);
+      setCameraDeviceLabel(usedFallback ? deviceLabel : null);
       await attachStreamToVideo(stream);
     } catch (err) {
       setErrorMsg(
@@ -728,8 +741,12 @@ export function MobileWalker() {
     setErrorMsg(null);
     cancelFrameLoop();
 
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
     try {
-      const { stream, actualFacingMode, usedFallback } =
+      const { stream, actualFacingMode, deviceLabel, usedFallback, switchedDevice } =
         await switchCameraStream(streamRef.current, targetMode);
 
       if (sessionIdRef.current !== activeSessionId) {
@@ -739,14 +756,17 @@ export function MobileWalker() {
 
       await attachStreamToVideo(stream);
       setFacingMode(actualFacingMode);
+      setCameraDeviceLabel(usedFallback ? deviceLabel : null);
       inFlightRef.current = false;
       encodingRef.current = false;
       lastValidFrameAtRef.current = performance.now();
       setSignalLost(false);
       startFrameLoop();
 
-      if (usedFallback && actualFacingMode === facingMode) {
+      if (!switchedDevice) {
         setStatusAnnouncement('Only one camera is available on this device.');
+      } else if (usedFallback && deviceLabel) {
+        setStatusAnnouncement(`Switched camera to ${deviceLabel}.`);
       } else {
         setStatusAnnouncement(
           `Switched to ${getCameraLabel(actualFacingMode).toLowerCase()} camera.`
@@ -1283,6 +1303,7 @@ export function MobileWalker() {
         <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
           <video
             ref={videoRef}
+            autoPlay
             playsInline
             muted
             className={`w-full bg-black object-contain ${
@@ -1291,7 +1312,9 @@ export function MobileWalker() {
           />
           <canvas ref={canvasRef} className="hidden" />
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
-            <span>Lens: {cameraLabel}</span>
+            <span className="truncate">
+              Lens: {cameraDeviceLabel ?? cameraLabel}
+            </span>
             <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
             <span>RTT: {rttMs} ms</span>
           </div>
