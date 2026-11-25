@@ -213,9 +213,14 @@ class DepthEngine:
 
                 dtype = torch.float16 if self._use_fp16 else torch.float32
                 self._torch = torch
-                self._model = AutoModelForDepthEstimation.from_pretrained(
-                    self.model_id, dtype=dtype
-                )
+                try:
+                    self._model = AutoModelForDepthEstimation.from_pretrained(
+                        self.model_id, dtype=dtype
+                    )
+                except TypeError:
+                    self._model = AutoModelForDepthEstimation.from_pretrained(
+                        self.model_id, torch_dtype=dtype
+                    )
                 self._model.to(device=self.device, dtype=dtype)
                 self._model.eval()
                 self.runtime = "torch-fp16" if self._use_fp16 else "torch-fp32"
@@ -289,6 +294,7 @@ class DepthEngine:
                 self._ort_input_name = inp0.name
                 self._ort_input_fp16 = "float16" in str(inp0.type).lower()
                 self.model_id = display_name
+                self._is_metric_model = "metric" in display_name.lower()
                 self.runtime = f"onnx-{tier}"
                 self.max_input_width = min(self.max_input_width, tier_max_w)
 

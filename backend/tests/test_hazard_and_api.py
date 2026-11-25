@@ -245,3 +245,21 @@ def test_yolo_enrichment_preserves_lean4_invariants() -> None:
     assert fused.steering == "VEER_RIGHT"
     assert "Chair" in fused.spoken_cue
     assert "1.1m" in fused.spoken_cue
+
+
+def test_onnx_relative_fallback_resets_is_metric_flag() -> None:
+    """PR #10 review regression test: relative ONNX models must NOT invert depth via 1/z."""
+    from backend.vision.depth_engine import DepthEngine
+
+    eng = DepthEngine(use_mock=True)
+    assert eng._is_metric_model is True
+    # Simulate ONNX branch loading a relative model (e.g. Depth-Anything-V2-Large-FP16)
+    display_name = "depth-anything/Depth-Anything-V2-Large-FP16"
+    eng.model_id = display_name
+    eng._is_metric_model = "metric" in display_name.lower()
+    assert eng._is_metric_model is False
+
+    # Verify higher relative disparity stays closer (no 1/z inversion!)
+    raw_disparity = np.linspace(1.0, 10.0, 120 * 160, dtype=np.float32).reshape(120, 160)
+    closeness, _ = eng._normalize_depth_fast(raw_disparity)
+    assert float(np.mean(closeness[-10:, :])) > float(np.mean(closeness[:10, :]))

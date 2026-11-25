@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +105,7 @@ class SemanticObjectDetector:
         self.use_mock = use_mock
         self.device: str = "cpu"
         self._model = None
+        self._lock = threading.Lock()
 
         if not use_mock:
             self._load_model()
@@ -146,7 +148,7 @@ class SemanticObjectDetector:
 
     def detect(
         self,
-        image: Image.Image,
+        image: Image.Image | np.ndarray,
         depth_meters: np.ndarray,
         max_objects: int = 6,
     ) -> ObjectDetectionResult:
@@ -154,15 +156,16 @@ class SemanticObjectDetector:
         if self.use_mock or self._model is None:
             return ObjectDetectionResult(objects=[], yolo_ms=0.0)
 
-        rgb = np.asarray(image)
+        rgb = image if isinstance(image, np.ndarray) else np.asarray(image)
         h, w = depth_meters.shape
-        results = self._model.predict(
-            rgb,
-            imgsz=320,
-            conf=self.conf_threshold,
-            device=self.device,
-            verbose=False,
-        )
+        with self._lock:
+            results = self._model.predict(
+                rgb,
+                imgsz=320,
+                conf=self.conf_threshold,
+                device=self.device,
+                verbose=False,
+            )
 
         detections: list[DetectedObject] = []
         if results:

@@ -16,7 +16,6 @@ from typing import Any
 import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
 from pydantic import BaseModel
 
 from backend.evaluation.benchmark_runner import run_benchmark
@@ -453,7 +452,7 @@ def _process_frame_critical_path(
     )
     depth_m = pred.depth_meters
     if obj_detector.is_active and depth_m is not None:
-        obj_res = obj_detector.detect(Image.fromarray(dec.rgb), depth_m)
+        obj_res = obj_detector.detect(dec.rgb, depth_m)
         haz = fuse_yolo_with_verified_hazard(haz, obj_res.objects, detector.config)
         detected_objects = obj_res.objects
         yolo_ms = obj_res.yolo_ms
