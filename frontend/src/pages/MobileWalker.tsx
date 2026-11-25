@@ -16,7 +16,11 @@ import {
 } from 'lucide-react';
 import { BirdEyeRadar } from '../components/BirdEyeRadar';
 import { HapticsEngine, type HapticPulseEvent } from '../services/haptics';
-import { SpatialAudioEngine } from '../services/spatialAudio';
+import {
+  SpatialAudioEngine,
+  type GuidanceProfile,
+  type VoiceLang,
+} from '../services/spatialAudio';
 import type {
   ExecutionMode,
   GuidancePayload,
@@ -110,7 +114,9 @@ export function MobileWalker() {
 
   const [hapticsOn, setHapticsOn] = useState(true);
   const [sonarOn, setSonarOn] = useState(true);
-  const [voiceOn, setVoiceOn] = useState(false);
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [guidanceProfile, setGuidanceProfile] = useState<GuidanceProfile>('smart_calm');
+  const [voiceLang, setVoiceLang] = useState<VoiceLang>('ru');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);
@@ -118,6 +124,7 @@ export function MobileWalker() {
   const [liveAnnouncement, setLiveAnnouncement] = useState('');
 
   const frameTimestampsRef = useRef<number[]>([]);
+  const smoothedRttRef = useRef<number>(250);
   const videoAspectRef = useRef<'portrait' | 'landscape'>('portrait');
   const dispatchFrameRef = useRef<() => void>(() => {});
   const lastAnnouncedSteeringRef = useRef<string | null>(null);
@@ -153,6 +160,15 @@ export function MobileWalker() {
     audioRef.current?.setVoiceEnabled(voiceOn);
   }, [voiceOn]);
 
+  useEffect(() => {
+    audioRef.current?.setProfile(guidanceProfile);
+    hapticsRef.current?.setCalmBackoff(guidanceProfile !== 'sonar_3d');
+  }, [guidanceProfile]);
+
+  useEffect(() => {
+    audioRef.current?.setVoiceLang(voiceLang);
+  }, [voiceLang]);
+
   const handleIncomingGuidance = useCallback((data: GuidancePayload) => {
     inFlightRef.current = false;
     lastValidFrameAtRef.current = performance.now();
@@ -160,7 +176,9 @@ export function MobileWalker() {
     setGuidance(data);
 
     const now = Date.now();
-    setRttMs(Math.max(1, Math.round(now - data.client_ts)));
+    const measuredRtt = Math.max(1, Math.round(now - data.client_ts));
+    smoothedRttRef.current = 0.75 * smoothedRttRef.current + 0.25 * measuredRtt;
+    setRttMs(measuredRtt);
 
     const stamp = performance.now();
     frameTimestampsRef.current = [
@@ -267,9 +285,7 @@ export function MobileWalker() {
       if (document.visibilityState === 'visible') {
         void acquireWakeLock();
       } else {
-        audioRef.current?.speakStatusImmediate(
-          'Warning: Glidance backgrounded. Guidance paused.'
-        );
+        audioRef.current?.speakStatusImmediate(null, true);
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
@@ -496,6 +512,8 @@ export function MobileWalker() {
     }
 
     await acquireWakeLock();
+    audioRef.current?.resetSessionState();
+    hapticsRef.current?.resetSessionState();
     sessionActiveRef.current = true;
     lastValidFrameAtRef.current = performance.now();
     setStreaming(true);
@@ -530,26 +548,25 @@ export function MobileWalker() {
     };
     stepLoop();
 
-    // Fail-Closed Telemetry Watchdog (Lean Theorem 1 `decideGuidance_failClosed`):
-    // Never leaves a blind walker on `PATH CLEAR` if frames stall or camera track dies!
+    // Adaptive RTT-Aware Watchdog: avoids false alarms on 4G / Cloudflare tunnels while catching real stalls!
     watchdogRef.current = window.setInterval(() => {
       if (!sessionActiveRef.current) return;
       const track = streamRef.current?.getVideoTracks()[0];
       const trackDead = !track || track.readyState === 'ended';
       const graceMs =
         activeRuntimeRef.current === 'worker' && !workerReadyRef.current
-          ? 12000
-          : 950;
+          ? 14000
+          : Math.max(3600, Math.min(8500, smoothedRttRef.current * 3.5));
       const stale = performance.now() - lastValidFrameAtRef.current > graceMs;
 
       if (trackDead || stale) {
         setSignalLost(true);
         hapticsRef.current?.triggerFailsafeDisconnect();
         audioRef.current?.triggerDisconnectAlarm(
-          trackDead ? 'Camera disconnected. Stop.' : 'Signal delayed. Stop and wait.'
+          trackDead ? 'camera_dead' : 'signal_delayed'
         );
       }
-    }, 250);
+    }, 350);
   };
 
   const quickCapture = async (label: SampleLabel) => {
@@ -716,12 +733,7 @@ export function MobileWalker() {
         type="button"
         onClick={() => {
           hapticsRef.current?.triggerTapFeedback();
-          const msg = signalLost
-            ? 'Signal lost. Stop and wait.'
-            : guidance
-              ? `${guidance.spoken_cue} Nearest ${Math.min(guidance.left.min_distance_m, guidance.center.min_distance_m, guidance.right.min_distance_m).toFixed(1)} meters.`
-              : 'Ready to walk. Tap Start Walking Stream below.';
-          audioRef.current?.speakStatusImmediate(msg);
+          audioRef.current?.speakStatusImmediate(guidance, signalLost);
         }}
         className={`w-full rounded-2xl border-2 p-5 text-center transition-colors ${meta.bg} ${meta.border}`}
       >
@@ -794,6 +806,40 @@ export function MobileWalker() {
         )}
       </div>
 
+      {/* Calm Guidance Profile Selector (eliminates audio fatigue & stationary nagging!) */}
+      <div
+        role="group"
+        aria-label="Audio guidance profile"
+        className="grid grid-cols-3 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 text-xs font-semibold"
+      >
+        {(
+          [
+            { id: 'smart_calm', label: 'Smart Calm' },
+            { id: 'sonar_3d', label: '3D Radar' },
+            { id: 'tactile_only', label: 'Silent Vibro' },
+          ] as const
+        ).map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            disabled={eyesFreeLock}
+            aria-pressed={guidanceProfile === p.id}
+            onClick={() => {
+              audioRef.current?.unlock();
+              hapticsRef.current?.triggerTapFeedback();
+              setGuidanceProfile(p.id);
+            }}
+            className={`rounded-lg px-2 py-2 transition ${
+              guidanceProfile === p.id
+                ? 'bg-emerald-500 text-slate-950 font-bold'
+                : 'text-slate-300 hover:bg-slate-800'
+            } disabled:opacity-50`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
       {/* Tactile & Audio controls */}
       <div className="grid grid-cols-2 gap-2.5">
         <button
@@ -813,52 +859,54 @@ export function MobileWalker() {
 
         <button
           type="button"
-          disabled={eyesFreeLock}
-          aria-pressed={sonarOn}
+          disabled={eyesFreeLock || guidanceProfile === 'tactile_only'}
+          aria-pressed={sonarOn && guidanceProfile !== 'tactile_only'}
           onClick={() => {
             audioRef.current?.unlock();
             setSonarOn((v) => !v);
           }}
           className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-semibold ${
-            sonarOn
+            sonarOn && guidanceProfile !== 'tactile_only'
               ? 'border-sky-400 bg-sky-500/20 text-sky-200'
               : 'border-slate-700 bg-slate-900 text-slate-400'
           } disabled:opacity-50`}
         >
-          {sonarOn ? (
+          {sonarOn && guidanceProfile !== 'tactile_only' ? (
             <Volume2 className="h-4 w-4" aria-hidden="true" />
           ) : (
             <VolumeX className="h-4 w-4" aria-hidden="true" />
           )}
-          3D HRTF Sonar: {sonarOn ? 'ON' : 'OFF'}
+          3D Sonar: {sonarOn && guidanceProfile !== 'tactile_only' ? 'ON' : 'OFF'}
         </button>
 
         <button
           type="button"
-          aria-pressed={voiceOn}
+          disabled={guidanceProfile === 'tactile_only'}
+          aria-pressed={voiceOn && guidanceProfile !== 'tactile_only'}
           onClick={() => {
             audioRef.current?.unlock();
             setVoiceOn((v) => !v);
           }}
           className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-semibold ${
-            voiceOn
+            voiceOn && guidanceProfile !== 'tactile_only'
               ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
               : 'border-slate-700 bg-slate-900 text-slate-400'
-          }`}
+          } disabled:opacity-50`}
         >
-          Voice Cues: {voiceOn ? 'ON' : 'OFF'}
+          Voice: {voiceOn && guidanceProfile !== 'tactile_only' ? `ON (${voiceLang.toUpperCase()})` : 'OFF'}
         </button>
 
         <button
           type="button"
           onClick={() => {
-            hapticsRef.current?.triggerTestBuzz();
-            audioRef.current?.playTestSonar();
+            audioRef.current?.unlock();
+            hapticsRef.current?.triggerTapFeedback();
+            setVoiceLang((l) => (l === 'ru' ? 'en' : 'ru'));
           }}
           className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-3 py-3 text-sm font-semibold text-slate-100 hover:bg-slate-700"
         >
           <Smartphone className="h-4 w-4" aria-hidden="true" />
-          Test Buzz + 3D Ping
+          Lang: {voiceLang === 'ru' ? 'Русский (1 слово)' : 'English (1 word)'}
         </button>
       </div>
 

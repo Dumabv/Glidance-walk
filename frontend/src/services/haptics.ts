@@ -31,6 +31,9 @@ export class HapticsEngine {
   private lastCooldownMs = 0;
   private lastRank = 0;
   private lastSteering: SteeringAction = 'CLEAR';
+  private sameStateBuzzCount = 0;
+  private minDistAtLastBuzz = 99;
+  private calmBackoff = true;
   private enabled = true;
   private iosSwitchLabel: HTMLLabelElement | null = null;
   private onPulse?: (evt: HapticPulseEvent) => void;
@@ -42,6 +45,17 @@ export class HapticsEngine {
   ) {
     this.onPulse = onPulse;
     this.onIosTactileFallback = onIosTactileFallback;
+  }
+
+  public setCalmBackoff(calm: boolean): void {
+    this.calmBackoff = calm;
+  }
+
+  public resetSessionState(): void {
+    this.lastRank = 0;
+    this.lastSteering = 'CLEAR';
+    this.sameStateBuzzCount = 0;
+    this.minDistAtLastBuzz = 99;
   }
 
   public isNativeVibrationSupported(): boolean {
@@ -91,12 +105,12 @@ export class HapticsEngine {
   public triggerFailsafeDisconnect(): void {
     if (!this.enabled) return;
     const now = performance.now();
-    if (this.lastRank < 5 || now - this.lastFiredAt >= 750) {
+    if (this.lastRank < 5 || now - this.lastFiredAt >= 3200) {
       this.firePattern(
         'FAILSAFE_SIGNAL_LOST',
-        [240, 75, 90, 75, 240],
+        [200, 70, 90, 70, 200],
         5,
-        820,
+        3200,
         this.lastRank < 5
       );
     }
@@ -109,6 +123,8 @@ export class HapticsEngine {
     if (guidance.overall_severity === 'clear' && !isCurb) {
       this.lastRank = 0;
       this.lastSteering = 'CLEAR';
+      this.sameStateBuzzCount = 0;
+      this.minDistAtLastBuzz = 99;
       return;
     }
 
@@ -119,7 +135,7 @@ export class HapticsEngine {
     );
     // Weber-Fechner inverse-exponential distance cadence (`sonic-vision` formula)
     const distCadenceMs = Math.round(
-      clamp(155 + 225 * Math.pow(clamp(minDist, 0.35, 3.5), 1.28), 185, 820)
+      clamp(190 + 250 * Math.pow(clamp(minDist, 0.35, 3.5), 1.28), 240, 1050)
     );
 
     let rank = 1;
@@ -157,16 +173,42 @@ export class HapticsEngine {
       }
     }
 
+    const stateChanged =
+      rank !== this.lastRank || guidance.steering !== this.lastSteering;
+    const movedCloser = this.minDistAtLastBuzz - minDist >= 0.25;
+
+    if (stateChanged) {
+      this.sameStateBuzzCount = 0;
+    }
+
     const patternDurationMs = pattern.reduce((acc, v) => acc + v, 0);
-    const requiredCooldownMs = Math.max(distCadenceMs, patternDurationMs + 75);
+    // Stationary anti-nag backoff: if standing still in front of the same object, gradually slow pulses!
+    const backoffFactor =
+      this.calmBackoff && !movedCloser
+        ? Math.pow(1.85, Math.min(4, this.sameStateBuzzCount))
+        : 1.0;
+    const requiredCooldownMs = Math.min(
+      6000,
+      Math.round(Math.max(distCadenceMs * backoffFactor, patternDurationMs + 95))
+    );
 
     const now = performance.now();
     const urgentPreempt =
       rank > this.lastRank ||
       (rank >= 2 && guidance.steering !== this.lastSteering);
 
-    if (urgentPreempt || now - this.lastFiredAt >= this.lastCooldownMs) {
+    if (
+      urgentPreempt ||
+      (movedCloser && now - this.lastFiredAt >= patternDurationMs + 90) ||
+      now - this.lastFiredAt >= this.lastCooldownMs
+    ) {
+      // In Smart Calm mode, mild stationary `caution` stops buzzing after 2 gentle nudges unless you move closer!
+      if (this.calmBackoff && rank === 1 && !stateChanged && !movedCloser && this.sameStateBuzzCount >= 2) {
+        return;
+      }
       this.lastSteering = guidance.steering;
+      this.minDistAtLastBuzz = minDist;
+      this.sameStateBuzzCount += 1;
       this.firePattern(label, pattern, rank, requiredCooldownMs, urgentPreempt);
     }
   }
