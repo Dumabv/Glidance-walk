@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass
+import glob
 import io
 import os
 from pathlib import Path
+import site
 import sys
 import threading
 import time
@@ -17,13 +19,50 @@ from PIL import Image
 
 from backend.schemas import GuidancePayload
 
+
+def _register_nvidia_cuda_dlls() -> None:
+    """Register pip-installed `nvidia/*/bin` CUDA/cuDNN DLL folders on Windows before ORT init."""
+    if not sys.platform.startswith("win"):
+        return
+    bins: list[str] = []
+    for sp in site.getsitepackages():
+        for d in glob.glob(os.path.join(sp, "nvidia", "*", "bin")):
+            if os.path.isdir(d):
+                bins.append(d)
+                try:
+                    os.add_dll_directory(d)
+                except OSError:
+                    pass
+    if bins:
+        cur = os.environ.get("PATH", "")
+        missing = [b for b in bins if b not in cur]
+        if missing:
+            os.environ["PATH"] = os.pathsep.join(missing) + os.pathsep + cur
+
 DEFAULT_MODEL_ID = os.getenv(
     "GLIDANCE_DEPTH_MODEL",
     "depth-anything/Depth-Anything-V2-Small-hf",
 )
-ONNX_QUANTIZED_URL = (
-    "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx"
-)
+ONNX_MODELS = {
+    "small": (
+        "depth_anything_v2_small_q8.onnx",
+        "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_quantized.onnx",
+        "depth-anything/Depth-Anything-V2-Small-Q8",
+        280,
+    ),
+    "base": (
+        "depth_anything_v2_base_fp16.onnx",
+        "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx",
+        "depth-anything/Depth-Anything-V2-Base-FP16",
+        336,
+    ),
+    "large": (
+        "depth_anything_v2_large_fp16.onnx",
+        "https://huggingface.co/onnx-community/depth-anything-v2-large/resolve/main/onnx/model_fp16.onnx",
+        "depth-anything/Depth-Anything-V2-Large-FP16",
+        280,
+    ),
+}
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -135,6 +174,7 @@ class DepthEngine:
         self._is_metric_model = "metric" in model_id.lower()
         self._ort_session = None
         self._ort_input_name: str = "pixel_values"
+        self._ort_input_fp16: bool = False
 
         # Preallocated reusable CHW input tensor buffer (zero per-frame 5MB allocations!)
         self._chw_buf: np.ndarray | None = None
@@ -188,42 +228,68 @@ class DepthEngine:
 
         if preferred in ("auto", "onnx"):
             try:
+                _register_nvidia_cuda_dlls()
                 import onnxruntime as ort
 
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                onnx_path = CACHE_DIR / "depth_anything_v2_small_q8.onnx"
-                if not onnx_path.exists():
-                    urllib.request.urlretrieve(ONNX_QUANTIZED_URL, str(onnx_path))
-
                 avail = ort.get_available_providers()
-                providers: list[str] = []
+                providers: list = []
+                has_gpu = False
                 if "CUDAExecutionProvider" in avail:
-                    providers.append("CUDAExecutionProvider")
-                    self.device = "cuda-ort"
+                    providers.append(
+                        ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"})
+                    )
+                    self.device = "cuda-rtx"
+                    has_gpu = True
                 elif "DmlExecutionProvider" in avail:
-                    providers.append("DmlExecutionProvider")
-                    self.device = "dml-ort"
+                    providers.append(("DmlExecutionProvider", {"device_id": 1}))
+                    self.device = "dml-gpu"
+                    has_gpu = True
                 else:
                     self.device = "cpu-ort"
                 providers.append("CPUExecutionProvider")
 
+                # Auto-upgrade to flagship 335M Large-FP16 on native CUDA RTX (24-27 FPS!),
+                # Base-FP16 on DirectML GPU, or lightweight Small-Q8 on CPU-only laptops.
+                req_tier = os.getenv("GLIDANCE_ONNX_TIER", "auto").lower()
+                tier = (
+                    req_tier
+                    if req_tier in ONNX_MODELS
+                    else ("large" if self.device == "cuda-rtx" else ("base" if has_gpu else "small"))
+                )
+                fname, url, display_name, tier_max_w = ONNX_MODELS[tier]
+                onnx_path = CACHE_DIR / fname
+                if not onnx_path.exists():
+                    urllib.request.urlretrieve(url, str(onnx_path))
+
                 sess_opts = ort.SessionOptions()
+                # Use ORT_ENABLE_BASIC on FP16 graphs (avoids ORT 1.24 LayerNorm fusion crash on some builds)
                 sess_opts.graph_optimization_level = (
-                    ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+                    if has_gpu
+                    else ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                 )
                 sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-                sess_opts.enable_cpu_mem_arena = True
-                sess_opts.enable_mem_pattern = True
-                # Match physical Zen/P-cores (avoid hyperthread AVX2 thrashing)
-                sess_opts.intra_op_num_threads = min(8, max(2, (os.cpu_count() or 4) // 2))
-                sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "1")
+                if self.device == "dml-gpu":
+                    sess_opts.enable_mem_pattern = False
+                elif not has_gpu:
+                    sess_opts.enable_cpu_mem_arena = True
+                    sess_opts.enable_mem_pattern = True
+                    sess_opts.intra_op_num_threads = min(8, max(2, (os.cpu_count() or 4) // 2))
+                    sess_opts.add_session_config_entry("session.intra_op.allow_spinning", "1")
 
                 self._ort_session = ort.InferenceSession(
                     str(onnx_path), sess_options=sess_opts, providers=providers
                 )
-                self._ort_input_name = self._ort_session.get_inputs()[0].name
-                self.runtime = "onnxruntime"
-                self.max_input_width = min(self.max_input_width, 280)
+                active_eps = self._ort_session.get_providers()
+                if "CUDAExecutionProvider" not in active_eps and "DmlExecutionProvider" not in active_eps:
+                    self.device = "cpu-ort"
+                inp0 = self._ort_session.get_inputs()[0]
+                self._ort_input_name = inp0.name
+                self._ort_input_fp16 = "float16" in str(inp0.type).lower()
+                self.model_id = display_name
+                self.runtime = f"onnx-{tier}"
+                self.max_input_width = min(self.max_input_width, tier_max_w)
 
                 dummy = np.full((196, 252, 3), 120, dtype=np.uint8)
                 self.predict_rgb(dummy)
@@ -397,7 +463,8 @@ class DepthEngine:
         with self._lock:
             chw = self._rgb_to_chw_fast(rgb_in)
             if self._ort_session is not None:
-                ort_out = self._ort_session.run(None, {self._ort_input_name: chw})[0]
+                ort_in = chw.astype(np.float16, copy=False) if self._ort_input_fp16 else chw
+                ort_out = self._ort_session.run(None, {self._ort_input_name: ort_in})[0]
                 raw_depth = np.squeeze(ort_out).astype(np.float32, copy=False)
             else:
                 torch = self._torch
