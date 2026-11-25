@@ -494,6 +494,11 @@ class GroundAwareHazardDetector:
         z_score_m: list[int] = []
         wall_ov_any = False
 
+        flat_vertical_plane = obs_slope < 0.20 and abs(q_bot - q_top) < 0.14
+        textureless_white_wall = (
+            flat_vertical_plane and luma_mean >= 20.0 and luma_std < 22.0 and raw_spread_milli <= 280
+        )
+
         for idx, (sx, ex) in enumerate(slices):
             hz = hazard_map[:, sx:ex]
             rz = roi[:, sx:ex]
@@ -513,8 +518,13 @@ class GroundAwareHazardDetector:
                 rel_m = max(rel_m, int(c_cfg.danger_milli) + 40)
 
             upper_med_m = int(round(float(np.percentile(rz[:upper_rows, :], 55.0)) * 1000.0))
-            is_wall = (raw_spread_milli <= WALL_SPREAD_EPS and upper_med_m >= WALL_PROXIMITY_MIN) or (
-                upper_med_m >= WALL_BLOCKAGE_MIN
+            white_wall_hit = (textureless_white_wall and upper_med_m >= 250) or (
+                flat_vertical_plane and raw_spread_milli <= 220 and upper_med_m >= 440
+            )
+            is_wall = (
+                (raw_spread_milli <= WALL_SPREAD_EPS and upper_med_m >= WALL_PROXIMITY_MIN)
+                or (upper_med_m >= WALL_BLOCKAGE_MIN)
+                or white_wall_hit
             )
             if is_wall:
                 wall_ov_any = True

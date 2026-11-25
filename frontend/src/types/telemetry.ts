@@ -64,6 +64,14 @@ export interface GuidancePayload {
   ultrasonic_dist_m?: number | null;
 }
 
+export type UltrasonicSurface =
+  | 'open_space'
+  | 'flat_wall_or_glass'
+  | 'furniture_or_corner'
+  | 'narrow_hallway';
+
+export type UltrasonicZone = 'clear' | 'danger' | 'approach' | 'far';
+
 export interface UltrasonicReading {
   active: boolean;
   calibrating: boolean;
@@ -75,9 +83,16 @@ export interface UltrasonicReading {
   directLevel: number;
   sampleRate: number;
   profile64: number[];
+  // Smart acoustic scene interpretation
+  surface: UltrasonicSurface;
+  surfaceLabel: string;
+  zone: UltrasonicZone;
+  approachMps: number; // negative = approaching fast!
+  roomReverb: 'open' | 'room' | 'enclosed';
+  peakWidthCm: number;
 }
 
-export type ElevationBand = 'down' | 'mid' | 'up';
+export type ElevationBand = 'down' | 'mid' | 'up' | 'sonar';
 
 export interface MemoryCellPoint {
   gx: number;

@@ -1,4 +1,8 @@
-import type { UltrasonicReading } from '../types/telemetry';
+import type {
+  UltrasonicReading,
+  UltrasonicSurface,
+  UltrasonicZone,
+} from '../types/telemetry';
 
 interface WasmSonarExports {
   memory: WebAssembly.Memory;
@@ -94,6 +98,7 @@ export class UltrasonicBatSonar {
   private workletUrl: string | null = null;
   private active = false;
   private onReading?: (reading: UltrasonicReading) => void;
+  private distHistory: { t: number; d: number }[] = [];
 
   constructor(onReading?: (reading: UltrasonicReading) => void) {
     this.onReading = onReading;
@@ -104,6 +109,7 @@ export class UltrasonicBatSonar {
   }
 
   public recalibrate(): void {
+    this.distHistory = [];
     this.wasm?.glidance_sonar_reset_cal();
   }
 
@@ -191,21 +197,109 @@ export class UltrasonicBatSonar {
       );
 
       const profile64: number[] = new Array(SONAR_BINS);
+      let peakIdx = 0;
+      let peakVal = 0;
+      let tailSum = 0;
+      let tailCount = 0;
       for (let i = 0; i < SONAR_BINS; i++) {
-        profile64[i] = f32[4 + i];
+        const v = f32[4 + i];
+        profile64[i] = v;
+        if (v > peakVal) {
+          peakVal = v;
+          peakIdx = i;
+        }
+        if (i >= 32) {
+          tailSum += v;
+          tailCount += 1;
+        }
       }
+
+      const detected = u8[0] === 1;
+      const signalOk = u8[1] === 1;
+      const calibrating = u8[2] === 1;
+      const distanceM = Math.round(f32[0] * 100) / 100;
+      const snr = Math.round(f32[1] * 10) / 10;
+      const confidence = Math.round(f32[2] * 100) / 100;
+      const directLevel = f32[3];
+
+      // Smart Acoustic Feature Extraction:
+      // 1. Peak FWHM Width (bins above 55% of peak):
+      //    Sharp narrow spike (<= 4 bins = <=10cm) => Specular FLAT WALL or GLASS/MIRROR!
+      //    Wide/multi-lobe echo (>= 5 bins)       => Diffuse FURNITURE / CORNER!
+      let widthBins = 1;
+      if (peakVal > 0.15) {
+        const halfThresh = peakVal * 0.55;
+        for (let l = peakIdx - 1; l >= 0 && profile64[l] >= halfThresh; l--) widthBins++;
+        for (let r = peakIdx + 1; r < SONAR_BINS && profile64[r] >= halfThresh; r++) widthBins++;
+      }
+      const peakWidthCm = Math.round(widthBins * 2.5);
+
+      // 2. Room Reverberation Envelope (far tail energy 1.06m..1.86m)
+      const tailMean = tailCount > 0 ? tailSum / tailCount : 0;
+      const roomReverb: 'open' | 'room' | 'enclosed' =
+        tailMean > 0.36 ? 'enclosed' : tailMean > 0.17 ? 'room' : 'open';
+
+      // 3. Approach Velocity (m/s, negative = closing in toward obstacle!)
+      const now = performance.now();
+      let approachMps = 0;
+      if (detected) {
+        this.distHistory.push({ t: now, d: distanceM });
+        if (this.distHistory.length > 6) this.distHistory.shift();
+        if (this.distHistory.length >= 3) {
+          const oldest = this.distHistory[0];
+          const dt = (now - oldest.t) / 1000;
+          if (dt > 0.12) {
+            approachMps = Math.round(((distanceM - oldest.d) / dt) * 10) / 10;
+          }
+        }
+      } else if (this.distHistory.length > 0 && now - this.distHistory[this.distHistory.length - 1].t > 600) {
+        this.distHistory = [];
+      }
+
+      // 4. Meaningful Acoustic Surface & Zone Classification
+      let surface: UltrasonicSurface = 'open_space';
+      let surfaceLabel = 'Open Space';
+      if (detected) {
+        if (widthBins <= 4 && snr >= 5.0) {
+          surface = 'flat_wall_or_glass';
+          surfaceLabel = 'Flat Wall / Glass';
+        } else if (roomReverb === 'enclosed' && distanceM >= 1.15) {
+          surface = 'narrow_hallway';
+          surfaceLabel = 'Narrow Hallway';
+        } else {
+          surface = 'furniture_or_corner';
+          surfaceLabel = 'Furniture / Corner';
+        }
+      } else if (roomReverb === 'enclosed') {
+        surface = 'narrow_hallway';
+        surfaceLabel = 'Enclosed Space';
+      }
+
+      const zone: UltrasonicZone = !detected
+        ? 'clear'
+        : distanceM <= 0.75
+          ? 'danger'
+          : distanceM <= 1.3
+            ? 'approach'
+            : 'far';
 
       this.onReading?.({
         active: true,
-        detected: u8[0] === 1,
-        signalOk: u8[1] === 1,
-        calibrating: u8[2] === 1,
-        distanceM: Math.round(f32[0] * 100) / 100,
-        snr: Math.round(f32[1] * 10) / 10,
-        confidence: Math.round(f32[2] * 100) / 100,
-        directLevel: f32[3],
+        detected,
+        signalOk,
+        calibrating,
+        distanceM,
+        snr,
+        confidence,
+        directLevel,
         sampleRate: fs,
         profile64,
+        surface,
+        surfaceLabel,
+        zone,
+        approachMps,
+        roomReverb,
+        peakWidthCm,
       });
     };
 

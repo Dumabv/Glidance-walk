@@ -5,6 +5,7 @@ import type {
   Severity,
   SpatialMemorySnapshot,
   SteeringAction,
+  UltrasonicReading,
   ZoneMetrics,
 } from '../types/telemetry';
 
@@ -60,10 +61,12 @@ export class SpatialMemoryEngine {
   // Fixed static buffers (~24 KB total RAM, 0 per-frame allocations!)
   private logOdds = new Float32Array(TOTAL_VOXELS);
   private curbFlags = new Uint8Array(GRID_LEN); // curbs live in BAND_DOWN
+  private sonarFlags = new Uint8Array(GRID_LEN); // ultrasonic glass/white-wall echoes painted onto map!
   private seenAge = new Float32Array(TOTAL_VOXELS);
 
   private scratchOdds = new Float32Array(TOTAL_VOXELS);
   private scratchCurb = new Uint8Array(GRID_LEN);
+  private scratchSonar = new Uint8Array(GRID_LEN);
   private scratchSeen = new Float32Array(TOTAL_VOXELS);
 
   private baseAlpha: number | null = null;
@@ -93,6 +96,7 @@ export class SpatialMemoryEngine {
   public reset(): void {
     this.logOdds.fill(0);
     this.curbFlags.fill(0);
+    this.sonarFlags.fill(0);
     this.seenAge.fill(0);
     this.baseAlpha = null;
     this.lastRawAlpha = null;
@@ -213,6 +217,7 @@ export class SpatialMemoryEngine {
   private shiftAllBands(dCol: number, dRow: number): void {
     this.scratchOdds.fill(0);
     this.scratchCurb.fill(0);
+    this.scratchSonar.fill(0);
     this.scratchSeen.fill(0);
 
     for (let b = 0; b < NUM_BANDS; b++) {
@@ -229,6 +234,7 @@ export class SpatialMemoryEngine {
           this.scratchSeen[dstIdx] = this.seenAge[srcIdx];
           if (b === BAND_DOWN) {
             this.scratchCurb[gy * GRID_N + gx] = this.curbFlags[srcY * GRID_N + srcX];
+            this.scratchSonar[gy * GRID_N + gx] = this.sonarFlags[srcY * GRID_N + srcX];
           }
         }
       }
@@ -236,7 +242,35 @@ export class SpatialMemoryEngine {
 
     this.logOdds.set(this.scratchOdds);
     this.curbFlags.set(this.scratchCurb);
+    this.sonarFlags.set(this.scratchSonar);
     this.seenAge.set(this.scratchSeen);
+  }
+
+  /**
+   * Paints confirmed 20kHz Ultrasonic Echoes (glass doors, blank white walls, dark walls)
+   * directly into the 360° rolling room map along current phone heading!
+   */
+  public stampUltrasonicEcho(ultra: UltrasonicReading): void {
+    if (!ultra.active || ultra.calibrating || !ultra.detected || ultra.confidence < 0.45) {
+      return;
+    }
+    const bOff = BAND_MID * GRID_LEN;
+    const dist = clamp(ultra.distanceM, 0.28, 1.85);
+    const arcHalf = ultra.surface === 'flat_wall_or_glass' ? 20 : 12;
+    const weight = 1.15 * ultra.confidence;
+
+    for (let rel = -arcHalf; rel <= arcHalf; rel += 5) {
+      const worldRad = ((this.headingDeg + rel) * Math.PI) / 180;
+      const gx = Math.floor(HALF_N + (Math.sin(worldRad) * dist) / CELL_M);
+      const gy = Math.floor(HALF_N + (Math.cos(worldRad) * dist) / CELL_M);
+      if (gx >= 0 && gx < GRID_N && gy >= 0 && gy < GRID_N) {
+        const gIdx = gy * GRID_N + gx;
+        const vIdx = bOff + gIdx;
+        this.logOdds[vIdx] = clamp(this.logOdds[vIdx] + weight, -2.4, 4.2);
+        this.seenAge[vIdx] = 1.0;
+        this.sonarFlags[gIdx] = 1;
+      }
+    }
   }
 
   public integrateAndFuse(raw: GuidancePayload): {
@@ -284,6 +318,9 @@ export class SpatialMemoryEngine {
       if (this.logOdds[BAND_DOWN * GRID_LEN + i] < 0.35) {
         this.curbFlags[i] = 0;
       }
+      if (this.logOdds[BAND_MID * GRID_LEN + i] < 0.35) {
+        this.sonarFlags[i] = 0;
+      }
     }
 
     // 3. Raycast into the appropriate vertical elevation band(s) (skipped during motion blur!)
@@ -318,11 +355,13 @@ export class SpatialMemoryEngine {
         // Conservative Bayesian update: requires ~3 consistent frames to reach P >= 84% (`logOdds >= 1.65`),
         // while free-space carving (`-0.68`) quickly erases 1-frame hallucinations!
         const hitWeight =
-          stampCurb || zone.severity === 'danger'
-            ? 0.92
-            : zone.severity === 'caution'
-              ? 0.58
-              : 0;
+          raw.wall_override
+            ? 1.95
+            : stampCurb || zone.severity === 'danger'
+              ? 1.05
+              : zone.severity === 'caution'
+                ? 0.65
+                : 0;
 
         for (let rel = relStartDeg; rel <= relEndDeg + 0.1; rel += 5.0) {
           const worldRad = ((this.headingDeg + rel) * Math.PI) / 180;
@@ -460,10 +499,11 @@ export class SpatialMemoryEngine {
       rawZ: ZoneMetrics,
       memSec: { prob: number; minDist: number }
     ): { zone: ZoneMetrics; suppressed: boolean } => {
-      if (raw.lens_blocked) return { zone: rawZ, suppressed: false };
+      // NEVER suppress confirmed close blank/white walls (`wall_override`) or covered lens!
+      if (raw.lens_blocked || raw.wall_override) return { zone: rawZ, suppressed: false };
 
-      // Confirmed by 3D multi-frame memory (across ANY elevation band: UP, MID, or DOWN!)
-      if (memSec.prob >= 0.83 && memSec.minDist <= 1.65) {
+      // Confirmed by 3D multi-frame memory (across ANY elevation band: UP, MID, DOWN, or 20kHz Sonar!)
+      if (memSec.prob >= 0.81 && memSec.minDist <= 1.85) {
         return {
           zone: {
             severity: 'danger',
@@ -633,11 +673,13 @@ export class SpatialMemoryEngine {
 
         if (bestOdds >= 1.1) {
           const band: ElevationBand =
-            oUp >= oMid && oUp >= oDown
-              ? 'up'
-              : oDown >= oMid
-                ? 'down'
-                : 'mid';
+            this.sonarFlags[gIdx] === 1
+              ? 'sonar'
+              : oUp >= oMid && oUp >= oDown
+                ? 'up'
+                : oDown >= oMid
+                  ? 'down'
+                  : 'mid';
           cells.push({
             gx,
             gy,

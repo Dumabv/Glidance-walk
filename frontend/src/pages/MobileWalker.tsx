@@ -161,6 +161,7 @@ export function MobileWalker() {
     batSonarRef.current = new UltrasonicBatSonar((r) => {
       batReadingRef.current = r;
       setBatReading(r);
+      memoryRef.current?.stampUltrasonicEcho(r);
     });
   }
 
@@ -198,21 +199,23 @@ export function MobileWalker() {
     const memOut = memoryRef.current?.integrateAndFuse(raw);
     let data = memOut ? memOut.fused : raw;
 
-    // Multimodal Sensor Fusion: Camera Depth + 20kHz Ultrasonic Bat-Sonar -> GLASS DOOR & 0-LUX SHIELD!
+    // Multimodal Sensor Fusion: Camera Depth + 20kHz Ultrasonic Bat-Sonar -> GLASS & WHITE-WALL SHIELD!
     const ultra = batReadingRef.current;
-    if (ultra && ultra.active && !ultra.calibrating && ultra.detected && ultra.confidence >= 0.55) {
-      const camMissedGlass =
+    if (ultra && ultra.active && !ultra.calibrating && ultra.detected && ultra.confidence >= 0.48) {
+      const camMissedBarrier =
         !data.lens_blocked &&
-        data.center.severity === 'clear' &&
-        data.center.min_distance_m > 1.7 &&
-        ultra.distanceM <= 1.35;
+        data.center.severity !== 'danger' &&
+        data.center.min_distance_m > 1.55 &&
+        ultra.distanceM <= 1.4;
 
-      if (camMissedGlass) {
+      if (camMissedBarrier) {
+        const isSpecular = ultra.surface === 'flat_wall_or_glass';
         data = {
           ...data,
           overall_severity: 'danger',
           steering: 'STOP',
-          glass_barrier: true,
+          glass_barrier: isSpecular,
+          wall_override: true,
           ultrasonic_dist_m: ultra.distanceM,
           center: {
             ...data.center,
@@ -220,15 +223,17 @@ export function MobileWalker() {
             obstacle_score: Math.max(data.center.obstacle_score, ultra.confidence),
             min_distance_m: ultra.distanceM,
           },
-          spoken_cue: `Glass or smooth barrier at ${ultra.distanceM.toFixed(1)}m. Stop.`,
-          memory_hint: `20kHz Ultrasonic Glass Shield: echo at ${ultra.distanceM.toFixed(2)}m (SNR ${ultra.snr.toFixed(1)}x)`,
+          spoken_cue: isSpecular
+            ? `Smooth wall or glass at ${ultra.distanceM.toFixed(1)}m. Stop.`
+            : `Acoustic obstacle at ${ultra.distanceM.toFixed(1)}m. Stop.`,
+          memory_hint: `20kHz Sonar (${ultra.surfaceLabel}): ${ultra.distanceM.toFixed(2)}m · SNR ${ultra.snr.toFixed(1)}x`,
         };
       } else if (data.lens_blocked && ultra.distanceM <= 1.75) {
         data = {
           ...data,
           ultrasonic_dist_m: ultra.distanceM,
-          spoken_cue: `Dark camera — 20kHz sonar wall at ${ultra.distanceM.toFixed(1)}m.`,
-          memory_hint: `0-Lux Bat-Sonar active: echo at ${ultra.distanceM.toFixed(2)}m`,
+          spoken_cue: `Dark camera — 20kHz sonar ${ultra.surfaceLabel.toLowerCase()} at ${ultra.distanceM.toFixed(1)}m.`,
+          memory_hint: `0-Lux Bat-Sonar: ${ultra.surfaceLabel} at ${ultra.distanceM.toFixed(2)}m`,
         };
       } else {
         data = { ...data, ultrasonic_dist_m: ultra.distanceM };
@@ -1060,12 +1065,12 @@ export function MobileWalker() {
         </p>
       )}
 
-      {/* Live 20kHz FMCW A-Scope Acoustic Echo Oscilloscope (0.26m -> 1.86m) */}
+      {/* Smart 20kHz FMCW Acoustic Analyzer: 3-Zone Colored A-Scope + Surface / Velocity / Room Classification */}
       {batSonarOn && batReading && (
         <div className="rounded-xl border border-fuchsia-500/40 bg-slate-900/90 p-3">
           <div className="mb-1.5 flex items-center justify-between text-[11px] font-semibold">
             <span className="text-fuchsia-300">
-              17.5–21kHz FMCW Echo A-Scope ({Math.round(batReading.sampleRate / 1000)}kHz ·{' '}
+              20kHz Acoustic Room Analyzer ({Math.round(batReading.sampleRate / 1000)}kHz ·{' '}
               {batReading.signalOk ? 'Mic Locked' : 'Low Mic Signal'})
             </span>
             <button
@@ -1076,13 +1081,65 @@ export function MobileWalker() {
               Re-Zero
             </button>
           </div>
-          <svg viewBox="0 0 320 68" className="h-16 w-full rounded bg-slate-950/80">
-            {[0.5, 1.0, 1.5].map((m) => {
+
+          {/* 3 Smart Acoustic Telemetry Cards */}
+          <div className="mb-2 grid grid-cols-3 gap-1.5 text-center text-[10px] font-bold">
+            <div className="rounded-md border border-slate-700 bg-slate-950/80 px-1.5 py-1 text-slate-200">
+              <div className="text-[9px] font-normal text-slate-400">Surface Type</div>
+              <div className={batReading.detected ? 'text-fuchsia-300' : 'text-emerald-300'}>
+                {batReading.calibrating ? 'Calibrating...' : batReading.surfaceLabel}
+              </div>
+            </div>
+            <div className="rounded-md border border-slate-700 bg-slate-950/80 px-1.5 py-1 text-slate-200">
+              <div className="text-[9px] font-normal text-slate-400">Echo / Speed</div>
+              <div
+                className={
+                  batReading.zone === 'danger'
+                    ? 'text-red-400'
+                    : batReading.zone === 'approach'
+                      ? 'text-amber-300'
+                      : 'text-slate-300'
+                }
+              >
+                {batReading.detected
+                  ? `${batReading.distanceM.toFixed(2)}m (${batReading.approachMps < -0.15 ? `${batReading.approachMps}m/s` : 'static'})`
+                  : 'Clear >1.8m'}
+              </div>
+            </div>
+            <div className="rounded-md border border-slate-700 bg-slate-950/80 px-1.5 py-1 text-slate-200">
+              <div className="text-[9px] font-normal text-slate-400">Acoustics / Width</div>
+              <div className="text-cyan-300">
+                {batReading.roomReverb.toUpperCase()} · {batReading.peakWidthCm}cm
+              </div>
+            </div>
+          </div>
+
+          {/* 3-Zone Color-Coded A-Scope: Danger (0.26-0.75m) | Approach (0.75-1.30m) | Far/Wall (1.30-1.86m) */}
+          <svg viewBox="0 0 320 72" className="h-18 w-full rounded bg-slate-950/90">
+            <rect x="0" y="0" width={((0.75 - 0.26) / 1.6) * 320} height="56" fill="rgba(239, 68, 68, 0.14)" />
+            <rect
+              x={((0.75 - 0.26) / 1.6) * 320}
+              y="0"
+              width={((1.3 - 0.75) / 1.6) * 320}
+              height="56"
+              fill="rgba(245, 158, 11, 0.10)"
+            />
+            <rect
+              x={((1.3 - 0.26) / 1.6) * 320}
+              y="0"
+              width={((1.86 - 1.3) / 1.6) * 320}
+              height="56"
+              fill="rgba(34, 211, 238, 0.08)"
+            />
+            <text x="6" y="10" fill="#fca5a5" fontSize="7.5" fontWeight="700">DANGER</text>
+            <text x="106" y="10" fill="#fcd34d" fontSize="7.5" fontWeight="700">APPROACH</text>
+            <text x="216" y="10" fill="#67e8f9" fontSize="7.5" fontWeight="700">ROOM WALL</text>
+            {[0.5, 0.75, 1.0, 1.3, 1.6].map((m) => {
               const x = ((m - 0.26) / 1.6) * 320;
               return (
                 <g key={m}>
                   <line x1={x} y1="0" x2={x} y2="56" stroke="#1e293b" strokeDasharray="2 2" />
-                  <text x={x + 2} y="65" fill="#64748b" fontSize="8" fontFamily="monospace">
+                  <text x={x + 2} y="67" fill="#64748b" fontSize="8" fontFamily="monospace">
                     {m.toFixed(1)}m
                   </text>
                 </g>
@@ -1090,18 +1147,24 @@ export function MobileWalker() {
             })}
             <polyline
               fill="none"
-              stroke={batReading.detected ? '#f43f5e' : '#e879f9'}
-              strokeWidth="2"
+              stroke={
+                batReading.zone === 'danger'
+                  ? '#f43f5e'
+                  : batReading.zone === 'approach'
+                    ? '#f59e0b'
+                    : '#e879f9'
+              }
+              strokeWidth="2.2"
               points={batReading.profile64
-                .map((v, i) => `${((i / 63) * 320).toFixed(1)},${(54 - v * 48).toFixed(1)}`)
+                .map((v, i) => `${((i / 63) * 320).toFixed(1)},${(54 - v * 46).toFixed(1)}`)
                 .join(' ')}
             />
             {batReading.detected && (
               <circle
                 cx={((batReading.distanceM - 0.26) / 1.6) * 320}
-                cy="12"
-                r="4"
-                fill="#f43f5e"
+                cy="16"
+                r="4.5"
+                fill={batReading.zone === 'danger' ? '#f43f5e' : '#e879f9'}
               />
             )}
           </svg>

@@ -181,9 +181,11 @@ export function BirdEyeRadar({ guidance, memory }: BirdEyeRadarProps) {
 
             const fill = c.isCurb
               ? `rgba(34, 211, 238, ${0.45 + 0.5 * c.prob})`
-              : c.prob > 0.78
-                ? `rgba(239, 68, 68, ${0.45 + 0.5 * c.prob})`
-                : `rgba(245, 158, 11, ${0.4 + 0.45 * c.prob})`;
+              : c.band === 'sonar'
+                ? `rgba(232, 121, 249, ${0.55 + 0.45 * c.prob})`
+                : c.prob > 0.78
+                  ? `rgba(239, 68, 68, ${0.45 + 0.5 * c.prob})`
+                  : `rgba(245, 158, 11, ${0.4 + 0.45 * c.prob})`;
 
             return (
               <rect

@@ -795,6 +795,14 @@ fn analyze_frame_with_qbuf(
     let mut zone_states = [ZoneState { severity: SEV_CLEAR, obstacle_score: 0 }; 3];
     let mut zone_outs = [CZoneOut::default(); 3];
 
+    // White / Painted Blank Wall Guard:
+    // Monocular depth models lose perspective on textureless white/beige walls (`luma_std < 22`,
+    // flat vertical depth `obs_slope < 0.20`, compressed spread `<= 280`), outputting mid-range
+    // flat closeness (`0.26..0.50`) that previously fell below `WALL_PROXIMITY_MIN (520)`.
+    let flat_vertical_plane = obs_slope < 0.20 && (q_bot - q_top).abs() < 0.14;
+    let textureless_white_wall =
+        flat_vertical_plane && luma_mean >= 20.0 && luma_std < 22.0 && raw_spread_milli <= 280;
+
     for z_idx in 0..3 {
         let p88 = quantile_from_hist_u32(&haz_hist[z_idx], total_px[z_idx], 880);
         let coverage = if total_px[z_idx] > 0 {
@@ -827,11 +835,17 @@ fn analyze_frame_with_qbuf(
             upper_px[z_idx],
             550,
         ));
-        if wall_override(raw_spread_milli, upper_median_milli) {
+        let white_wall_hit =
+            (textureless_white_wall && upper_median_milli >= 250)
+            || (flat_vertical_plane && raw_spread_milli <= 220 && upper_median_milli >= 440);
+        if wall_override(raw_spread_milli, upper_median_milli) || white_wall_hit {
             out.flags |= 0x01;
         }
-        let raw_combined_milli =
-            combine_wall_hazard(rel_score_milli, raw_spread_milli, upper_median_milli);
+        let raw_combined_milli = if white_wall_hit {
+            WALL_DANGER_SCORE
+        } else {
+            combine_wall_hazard(rel_score_milli, raw_spread_milli, upper_median_milli)
+        };
 
         let score_milli = if stateful {
             let prev = state.ema_scores_milli[z_idx];
@@ -2095,6 +2109,13 @@ mod tests {
         let res_ramp = analyze_frame_slice(&ramp, h, w, 720, 120.0, 30.0, 58.0, false, true, &cfg, &mut st);
         assert_eq!(res_ramp.overall_severity, SEV_CLEAR);
         assert_eq!(res_ramp.steering, ACT_CLEAR);
+
+        // Blank white wall (low RGB texture luma_std=9.5, flat depth ~0.42, compressed spread=160) -> MUST STOP!
+        let white_wall = vec![0.42f32; h * w];
+        let res_white = analyze_frame_slice(&white_wall, h, w, 160, 205.0, 9.5, 85.0, false, true, &cfg, &mut st);
+        assert_eq!(res_white.overall_severity, SEV_DANGER);
+        assert_eq!(res_white.steering, ACT_STOP);
+        assert_ne!(res_white.flags & 0x01, 0);
     }
 
     #[test]
