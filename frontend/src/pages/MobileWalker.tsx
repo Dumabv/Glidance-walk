@@ -22,12 +22,14 @@ import {
   type VoiceLang,
 } from '../services/spatialAudio';
 import { SpatialMemoryEngine } from '../services/spatialMemory';
+import { UltrasonicBatSonar } from '../services/ultrasonicSonar';
 import type {
   ExecutionMode,
   GuidancePayload,
   SampleLabel,
   SpatialMemorySnapshot,
   SteeringAction,
+  UltrasonicReading,
 } from '../types/telemetry';
 
 const STEERING_META: Record<
@@ -111,6 +113,10 @@ export function MobileWalker() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [guidance, setGuidance] = useState<GuidancePayload | null>(null);
   const [memorySnap, setMemorySnap] = useState<SpatialMemorySnapshot | null>(null);
+  const [batSonarOn, setBatSonarOn] = useState(false);
+  const [batReading, setBatReading] = useState<UltrasonicReading | null>(null);
+  const [batError, setBatError] = useState<string | null>(null);
+  const batReadingRef = useRef<UltrasonicReading | null>(null);
   const [rttMs, setRttMs] = useState<number>(0);
   const [fps, setFps] = useState<number>(0);
   const [videoAspect, setVideoAspect] = useState<'portrait' | 'landscape'>('portrait');
@@ -137,6 +143,7 @@ export function MobileWalker() {
   const audioRef = useRef<SpatialAudioEngine | null>(null);
   const hapticsRef = useRef<HapticsEngine | null>(null);
   const memoryRef = useRef<SpatialMemoryEngine | null>(null);
+  const batSonarRef = useRef<UltrasonicBatSonar | null>(null);
 
   if (!audioRef.current) {
     audioRef.current = new SpatialAudioEngine();
@@ -149,6 +156,12 @@ export function MobileWalker() {
   }
   if (!memoryRef.current) {
     memoryRef.current = new SpatialMemoryEngine();
+  }
+  if (!batSonarRef.current) {
+    batSonarRef.current = new UltrasonicBatSonar((r) => {
+      batReadingRef.current = r;
+      setBatReading(r);
+    });
   }
 
   useEffect(() => {
@@ -181,11 +194,53 @@ export function MobileWalker() {
     lastValidFrameAtRef.current = performance.now();
     setSignalLost(false);
 
-    // Fuse narrow 62° frame into 360° rolling Spatial Memory (12 KB RAM, ~0.02ms CPU)
+    // Fuse narrow 62° frame into 360° rolling Spatial Memory (24 KB RAM, ~0.03ms CPU)
     const memOut = memoryRef.current?.integrateAndFuse(raw);
-    const data = memOut ? memOut.fused : raw;
+    let data = memOut ? memOut.fused : raw;
+
+    // Multimodal Sensor Fusion: Camera Depth + 20kHz Ultrasonic Bat-Sonar -> GLASS DOOR & 0-LUX SHIELD!
+    const ultra = batReadingRef.current;
+    if (ultra && ultra.active && !ultra.calibrating && ultra.detected && ultra.confidence >= 0.55) {
+      const camMissedGlass =
+        !data.lens_blocked &&
+        data.center.severity === 'clear' &&
+        data.center.min_distance_m > 1.7 &&
+        ultra.distanceM <= 1.35;
+
+      if (camMissedGlass) {
+        data = {
+          ...data,
+          overall_severity: 'danger',
+          steering: 'STOP',
+          glass_barrier: true,
+          ultrasonic_dist_m: ultra.distanceM,
+          center: {
+            ...data.center,
+            severity: 'danger',
+            obstacle_score: Math.max(data.center.obstacle_score, ultra.confidence),
+            min_distance_m: ultra.distanceM,
+          },
+          spoken_cue: `Glass or smooth barrier at ${ultra.distanceM.toFixed(1)}m. Stop.`,
+          memory_hint: `20kHz Ultrasonic Glass Shield: echo at ${ultra.distanceM.toFixed(2)}m (SNR ${ultra.snr.toFixed(1)}x)`,
+        };
+      } else if (data.lens_blocked && ultra.distanceM <= 1.75) {
+        data = {
+          ...data,
+          ultrasonic_dist_m: ultra.distanceM,
+          spoken_cue: `Dark camera — 20kHz sonar wall at ${ultra.distanceM.toFixed(1)}m.`,
+          memory_hint: `0-Lux Bat-Sonar active: echo at ${ultra.distanceM.toFixed(2)}m`,
+        };
+      } else {
+        data = { ...data, ultrasonic_dist_m: ultra.distanceM };
+      }
+    }
+
     if (memOut) {
-      setMemorySnap(memOut.snapshot);
+      setMemorySnap(
+        data.glass_barrier && data.memory_hint
+          ? { ...memOut.snapshot, memoryHint: data.memory_hint }
+          : memOut.snapshot
+      );
     }
     setGuidance(data);
 
@@ -307,6 +362,7 @@ export function MobileWalker() {
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
       stopSession();
+      batSonarRef.current?.stop();
       workerRef.current?.terminate();
       workerRef.current = null;
       audioRef.current?.dispose();
@@ -955,7 +1011,102 @@ export function MobileWalker() {
           <Smartphone className="h-4 w-4" aria-hidden="true" />
           Lang: {voiceLang === 'ru' ? 'Русский (1 слово)' : 'English (1 word)'}
         </button>
+
+        {/* Active 17.5–21.0 kHz FMCW Ultrasonic Bat-Sonar (Glass Door & Pitch-Darkness Shield!) */}
+        <button
+          type="button"
+          disabled={eyesFreeLock}
+          aria-pressed={batSonarOn}
+          onClick={() => {
+            hapticsRef.current?.triggerTapFeedback();
+            setBatError(null);
+            if (batSonarOn) {
+              batSonarRef.current?.stop();
+              batReadingRef.current = null;
+              setBatReading(null);
+              setBatSonarOn(false);
+            } else {
+              void batSonarRef.current
+                ?.start()
+                .then(() => setBatSonarOn(true))
+                .catch((err) => {
+                  setBatError(
+                    err instanceof Error ? err.message : 'Microphone permission required for 20kHz sonar'
+                  );
+                  setBatSonarOn(false);
+                });
+            }
+          }}
+          className={`col-span-2 flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-bold transition ${
+            batSonarOn
+              ? 'border-fuchsia-400 bg-fuchsia-500/20 text-fuchsia-200'
+              : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800'
+          } disabled:opacity-50`}
+        >
+          <Radio className="h-4 w-4" aria-hidden="true" />
+          {batSonarOn
+            ? batReading?.calibrating
+              ? '20kHz Bat-Sonar: Calibrating Chassis...'
+              : batReading?.detected
+                ? `20kHz Bat-Sonar: ECHO ${batReading.distanceM.toFixed(2)}m (SNR ${batReading.snr}x)`
+                : '20kHz Ultrasonic Glass Shield: ACTIVE'
+            : 'Enable 20kHz Ultrasonic Bat-Sonar (Glass & Darkness)'}
+        </button>
       </div>
+
+      {batError && (
+        <p role="alert" className="rounded-lg border border-red-500/50 bg-red-950/60 px-3 py-1.5 text-xs text-red-200">
+          20kHz Sonar error: {batError}
+        </p>
+      )}
+
+      {/* Live 20kHz FMCW A-Scope Acoustic Echo Oscilloscope (0.26m -> 1.86m) */}
+      {batSonarOn && batReading && (
+        <div className="rounded-xl border border-fuchsia-500/40 bg-slate-900/90 p-3">
+          <div className="mb-1.5 flex items-center justify-between text-[11px] font-semibold">
+            <span className="text-fuchsia-300">
+              17.5–21kHz FMCW Echo A-Scope ({Math.round(batReading.sampleRate / 1000)}kHz ·{' '}
+              {batReading.signalOk ? 'Mic Locked' : 'Low Mic Signal'})
+            </span>
+            <button
+              type="button"
+              onClick={() => batSonarRef.current?.recalibrate()}
+              className="rounded border border-fuchsia-500/50 bg-fuchsia-950/60 px-2 py-0.5 text-[10px] text-fuchsia-200 hover:bg-fuchsia-900/60"
+            >
+              Re-Zero
+            </button>
+          </div>
+          <svg viewBox="0 0 320 68" className="h-16 w-full rounded bg-slate-950/80">
+            {[0.5, 1.0, 1.5].map((m) => {
+              const x = ((m - 0.26) / 1.6) * 320;
+              return (
+                <g key={m}>
+                  <line x1={x} y1="0" x2={x} y2="56" stroke="#1e293b" strokeDasharray="2 2" />
+                  <text x={x + 2} y="65" fill="#64748b" fontSize="8" fontFamily="monospace">
+                    {m.toFixed(1)}m
+                  </text>
+                </g>
+              );
+            })}
+            <polyline
+              fill="none"
+              stroke={batReading.detected ? '#f43f5e' : '#e879f9'}
+              strokeWidth="2"
+              points={batReading.profile64
+                .map((v, i) => `${((i / 63) * 320).toFixed(1)},${(54 - v * 48).toFixed(1)}`)
+                .join(' ')}
+            />
+            {batReading.detected && (
+              <circle
+                cx={((batReading.distanceM - 0.26) / 1.6) * 320}
+                cy="12"
+                r="4"
+                fill="#f43f5e"
+              />
+            )}
+          </svg>
+        </div>
+      )}
 
       {/* Live Camera Preview (Aspect-Ratio Faithful!) & Radar */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

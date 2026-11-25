@@ -17,6 +17,13 @@ function getCrispCallout(
 ): { key: string; text: string; urgent: boolean } | null {
   const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
 
+  if (guidance.glass_barrier) {
+    return {
+      key: 'GLASS_BARRIER',
+      text: lang === 'ru' ? 'Стекло впереди' : 'Glass ahead',
+      urgent: true,
+    };
+  }
   if (guidance.lens_blocked) {
     return {
       key: 'LENS_BLOCKED',

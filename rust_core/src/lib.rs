@@ -1536,6 +1536,394 @@ pub unsafe extern "C" fn glidance_wasm_normalize_and_analyze(
     )
 }
 
+// ============================================================================
+// Active 17.5–21.0 kHz Phase-Aligned FMCW Ultrasonic Bat-Sonar (`#![no_std]`)
+// Real acoustic physics: 2nd-order HPF (-47dB voice rejection) + direct-path
+// self-sync + complex phase referencing + coherent MTI/static echo detector!
+// Detects transparent GLASS doors & walls in 0-lux pitch darkness (0.26–1.86m).
+// ============================================================================
+
+pub const SONAR_CHIRP_LEN: usize = 256;
+pub const SONAR_PERIOD: usize = 2048;
+pub const SONAR_FRAME_LEN: usize = 4096;
+pub const SONAR_BINS: usize = 64;
+const SONAR_MIN_DIST_M: f32 = 0.26;
+const SONAR_MAX_DIST_M: f32 = 1.86;
+const SONAR_DIRECT_OFFSET_M: f32 = 0.08;
+const SONAR_SPEED_OF_SOUND: f32 = 343.0;
+const PI_F32: f32 = 3.14159265358979323846;
+const TAU_F32: f32 = 6.28318530717958647692;
+
+#[inline(always)]
+fn sin_f32_nostd(mut x: f32) -> f32 {
+    // Range-reduce to [-pi, pi]
+    let k = ((x + PI_F32) / TAU_F32) as i32;
+    x -= (k as f32) * TAU_F32;
+    if x > PI_F32 {
+        x -= TAU_F32;
+    } else if x < -PI_F32 {
+        x += TAU_F32;
+    }
+    // Fold into [-pi/2, pi/2]
+    let half_pi = 0.5 * PI_F32;
+    if x > half_pi {
+        x = PI_F32 - x;
+    } else if x < -half_pi {
+        x = -PI_F32 - x;
+    }
+    let x2 = x * x;
+    x * (1.0 - x2 * (1.0 / 6.0 - x2 * (1.0 / 120.0 - x2 * (1.0 / 5040.0))))
+}
+
+#[inline(always)]
+fn cos_f32_nostd(x: f32) -> f32 {
+    sin_f32_nostd(x + 0.5 * PI_F32)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CSonarOutput {
+    pub detected: u8,
+    pub direct_signal_ok: u8,
+    pub calibrating: u8,
+    pub _pad: u8,
+    pub distance_m: f32,
+    pub snr: f32,
+    pub confidence: f32,
+    pub direct_level: f32,
+    pub profile: [f32; SONAR_BINS],
+}
+
+impl Default for CSonarOutput {
+    fn default() -> Self {
+        Self {
+            detected: 0,
+            direct_signal_ok: 0,
+            calibrating: 1,
+            _pad: 0,
+            distance_m: 2.5,
+            snr: 0.0,
+            confidence: 0.0,
+            direct_level: 0.0,
+            profile: [0.0; SONAR_BINS],
+        }
+    }
+}
+
+struct SonarState {
+    sample_rate: f32,
+    tx_chirp: [f32; SONAR_CHIRP_LEN],
+    ref_i: [f32; SONAR_CHIRP_LEN],
+    ref_q: [f32; SONAR_CHIRP_LEN],
+    bg_i: [f32; SONAR_BINS],
+    bg_q: [f32; SONAR_BINS],
+    bg_mag: [f32; SONAR_BINS],
+    cal_frames: u32,
+    hit_streak: u32,
+    ema_dist_m: f32,
+}
+
+impl SonarState {
+    const fn new() -> Self {
+        Self {
+            sample_rate: 48_000.0,
+            tx_chirp: [0.0; SONAR_CHIRP_LEN],
+            ref_i: [0.0; SONAR_CHIRP_LEN],
+            ref_q: [0.0; SONAR_CHIRP_LEN],
+            bg_i: [0.0; SONAR_BINS],
+            bg_q: [0.0; SONAR_BINS],
+            bg_mag: [0.0; SONAR_BINS],
+            cal_frames: 0,
+            hit_streak: 0,
+            ema_dist_m: 2.5,
+        }
+    }
+
+    fn init(&mut self, sample_rate: f32) {
+        let fs = clamp_f32(sample_rate, 32_000.0, 96_000.0);
+        self.sample_rate = fs;
+        // Pick optimal near-ultrasonic sweep safely below ADC anti-aliasing filter
+        let (f0, f1) = if fs >= 46_000.0 {
+            (17_500.0f32, 21_000.0f32)
+        } else {
+            (16_800.0f32, 19_800.0f32)
+        };
+        let dur = (SONAR_CHIRP_LEN as f32) / fs;
+        let k_rate = (f1 - f0) / dur;
+        let mut energy = 0.0f32;
+
+        for n in 0..SONAR_CHIRP_LEN {
+            let t = (n as f32) / fs;
+            let phase = TAU_F32 * (f0 * t + 0.5 * k_rate * t * t);
+            let win = 0.5 * (1.0 - cos_f32_nostd(TAU_F32 * (n as f32) / ((SONAR_CHIRP_LEN - 1) as f32)));
+            let ci = win * cos_f32_nostd(phase);
+            let cq = win * sin_f32_nostd(phase);
+            self.tx_chirp[n] = ci;
+            self.ref_i[n] = ci;
+            self.ref_q[n] = cq;
+            energy += ci * ci + cq * cq;
+        }
+        let inv_norm = 1.0 / sqrt_f32(energy.max(1e-6));
+        for n in 0..SONAR_CHIRP_LEN {
+            self.ref_i[n] *= inv_norm;
+            self.ref_q[n] *= inv_norm;
+        }
+        self.reset_calibration();
+    }
+
+    fn reset_calibration(&mut self) {
+        self.bg_i = [0.0; SONAR_BINS];
+        self.bg_q = [0.0; SONAR_BINS];
+        self.bg_mag = [0.0; SONAR_BINS];
+        self.cal_frames = 0;
+        self.hit_streak = 0;
+        self.ema_dist_m = 2.5;
+    }
+
+    #[inline(always)]
+    fn correlate_at(&self, hp: &[f32; SONAR_FRAME_LEN], start: usize) -> (f32, f32) {
+        let mut acc_i = 0.0f32;
+        let mut acc_q = 0.0f32;
+        let seg = &hp[start..start + SONAR_CHIRP_LEN];
+        for n in 0..SONAR_CHIRP_LEN {
+            let s = seg[n];
+            acc_i += s * self.ref_i[n];
+            acc_q += s * self.ref_q[n];
+        }
+        (acc_i, acc_q)
+    }
+
+    fn process(&mut self, mic: &[f32; SONAR_FRAME_LEN], hp: &mut [f32; SONAR_FRAME_LEN]) -> CSonarOutput {
+        let mut out = CSonarOutput::default();
+
+        // 1. 2nd-order High-Pass Pre-Filter (`x[n] - 2x[n-1] + x[n-2]`):
+        //    Rejects 1kHz human speech & room noise by -47 dB while amplifying 18–21 kHz!
+        hp[0] = 0.0;
+        hp[1] = 0.0;
+        for n in 2..SONAR_FRAME_LEN {
+            let v = mic[n] - 2.0 * mic[n - 1] + mic[n - 2];
+            hp[n] = if v.is_finite() { v * 0.25 } else { 0.0 };
+        }
+
+        // 2. Direct-Path Self-Synchronization (`tau0 in [4 .. SONAR_PERIOD)`):
+        //    Guarantees full 1.86m echo window fits strictly inside `[0 .. 4096)`!
+        let max_lag_samples =
+            (((SONAR_MAX_DIST_M - SONAR_DIRECT_OFFSET_M) * 2.0 * self.sample_rate) / SONAR_SPEED_OF_SOUND) as usize + 8;
+        let search_end = SONAR_PERIOD.min(SONAR_FRAME_LEN.saturating_sub(SONAR_CHIRP_LEN + max_lag_samples));
+
+        let mut best_coarse = 4usize;
+        let mut best_pow = -1.0f32;
+        let mut k = 4usize;
+        while k < search_end {
+            let (ci, cq) = self.correlate_at(hp, k);
+            let p = ci * ci + cq * cq;
+            if p > best_pow {
+                best_pow = p;
+                best_coarse = k;
+            }
+            k += 4;
+        }
+
+        let fine_lo = best_coarse.saturating_sub(6).max(2);
+        let fine_hi = (best_coarse + 6).min(search_end);
+        let mut tau0 = best_coarse;
+        let mut direct_i = 0.0f32;
+        let mut direct_q = 0.0f32;
+        best_pow = -1.0;
+        for idx in fine_lo..=fine_hi {
+            let (ci, cq) = self.correlate_at(hp, idx);
+            let p = ci * ci + cq * cq;
+            if p > best_pow {
+                best_pow = p;
+                tau0 = idx;
+                direct_i = ci;
+                direct_q = cq;
+            }
+        }
+
+        let direct_mag = sqrt_f32(best_pow.max(0.0));
+        out.direct_level = direct_mag;
+        if direct_mag < 2e-4 {
+            out.direct_signal_ok = 0;
+            out.calibrating = if self.cal_frames < 10 { 1 } else { 0 };
+            self.hit_streak = 0;
+            return out;
+        }
+        out.direct_signal_ok = 1;
+
+        // 3. Phase-Aligned Complex Matched Filter across 64 range bins (`0.26m .. 1.86m`, 2.5cm/bin)
+        let inv_direct_pow = 1.0 / best_pow.max(1e-10);
+        let bin_step_m = (SONAR_MAX_DIST_M - SONAR_MIN_DIST_M) / (SONAR_BINS as f32);
+        let samples_per_m = (2.0 * self.sample_rate) / SONAR_SPEED_OF_SOUND;
+
+        let mut z_i = [0.0f32; SONAR_BINS];
+        let mut z_q = [0.0f32; SONAR_BINS];
+        let mut z_mag = [0.0f32; SONAR_BINS];
+
+        for b in 0..SONAR_BINS {
+            let d_lo = SONAR_MIN_DIST_M + (b as f32) * bin_step_m;
+            let d_hi = d_lo + bin_step_m;
+            let lag_lo = (((d_lo - SONAR_DIRECT_OFFSET_M) * samples_per_m).max(16.0)) as usize;
+            let lag_hi = (((d_hi - SONAR_DIRECT_OFFSET_M) * samples_per_m).max((lag_lo + 1) as f32)) as usize;
+
+            // Evaluate 2 sub-samples inside each 2.5cm bin and keep strongest coherent echo phasor
+            let mid_lag = (lag_lo + lag_hi) / 2;
+            let mut best_bi = 0.0f32;
+            let mut best_bq = 0.0f32;
+            let mut best_bp = -1.0f32;
+
+            for &lag in &[lag_lo, mid_lag] {
+                let pos = tau0 + lag;
+                if pos + SONAR_CHIRP_LEN <= SONAR_FRAME_LEN {
+                    let (ci, cq) = self.correlate_at(hp, pos);
+                    let p = ci * ci + cq * cq;
+                    if p > best_bp {
+                        best_bp = p;
+                        best_bi = ci;
+                        best_bq = cq;
+                    }
+                }
+            }
+
+            // Complex phase-alignment: Z_aligned = Z * conj(Z_direct) / |Z_direct|^2
+            // Cancels both OS audio latency AND fractional sample-clock phase jitter!
+            let ai = (best_bi * direct_i + best_bq * direct_q) * inv_direct_pow;
+            let aq = (best_bq * direct_i - best_bi * direct_q) * inv_direct_pow;
+            z_i[b] = ai;
+            z_q[b] = aq;
+            z_mag[b] = sqrt_f32((ai * ai + aq * aq).max(0.0));
+        }
+
+        // 4. Open-Air Chassis Calibration (first 10 chirps ~ 0.85s)
+        if self.cal_frames < 10 {
+            let w_new = 1.0 / ((self.cal_frames + 1) as f32);
+            let w_old = 1.0 - w_new;
+            for b in 0..SONAR_BINS {
+                self.bg_i[b] = w_old * self.bg_i[b] + w_new * z_i[b];
+                self.bg_q[b] = w_old * self.bg_q[b] + w_new * z_q[b];
+                self.bg_mag[b] = w_old * self.bg_mag[b] + w_new * z_mag[b];
+                out.profile[b] = clamp_f32(z_mag[b] * 4.0, 0.0, 1.0);
+            }
+            self.cal_frames += 1;
+            out.calibrating = 1;
+            return out;
+        }
+        out.calibrating = 0;
+
+        // 5. Coherent Complex MTI + Calibrated Static Echo Profile
+        let mut echo = [0.0f32; SONAR_BINS];
+        let mut echo_sorted = [0.0f32; SONAR_BINS];
+        let mut peak_val = 0.0f32;
+        let mut peak_bin = 0usize;
+
+        for b in 0..SONAR_BINS {
+            let di = z_i[b] - self.bg_i[b];
+            let dq = z_q[b] - self.bg_q[b];
+            let mti = sqrt_f32((di * di + dq * dq).max(0.0));
+            let stat = (z_mag[b] - self.bg_mag[b] * 1.18).max(0.0);
+            // Distance-compensated gain (1/r acoustic spreading compensation)
+            let dist_b = SONAR_MIN_DIST_M + ((b as f32) + 0.5) * bin_step_m;
+            let comp = mti.max(stat) * clamp_f32(dist_b / 0.75, 0.85, 1.8);
+            echo[b] = comp;
+            echo_sorted[b] = comp;
+            if comp > peak_val {
+                peak_val = comp;
+                peak_bin = b;
+            }
+        }
+
+        let noise_floor = small_slice_median(&mut echo_sorted).max(0.0025);
+        let snr = peak_val / noise_floor;
+        out.snr = snr;
+
+        // Normalize visual A-Scope profile [0..1]
+        let vis_scale = 1.0 / (noise_floor * 7.5).max(0.035);
+        for b in 0..SONAR_BINS {
+            out.profile[b] = clamp_f32(echo[b] * vis_scale, 0.0, 1.0);
+        }
+
+        let raw_hit = snr >= 3.8 && peak_val >= 0.014;
+        if raw_hit {
+            self.hit_streak = self.hit_streak.saturating_add(1);
+            let raw_dist = SONAR_MIN_DIST_M + ((peak_bin as f32) + 0.5) * bin_step_m;
+            self.ema_dist_m = if self.hit_streak <= 1 {
+                raw_dist
+            } else {
+                0.55 * self.ema_dist_m + 0.45 * raw_dist
+            };
+        } else {
+            self.hit_streak = 0;
+            // Very slow background adaptation ONLY when no close reflector is detected
+            for b in 0..SONAR_BINS {
+                self.bg_i[b] = 0.985 * self.bg_i[b] + 0.015 * z_i[b];
+                self.bg_q[b] = 0.985 * self.bg_q[b] + 0.015 * z_q[b];
+                self.bg_mag[b] = 0.985 * self.bg_mag[b] + 0.015 * z_mag[b];
+            }
+        }
+
+        if self.hit_streak >= 2 {
+            out.detected = 1;
+            out.distance_m = clamp_f32(self.ema_dist_m, SONAR_MIN_DIST_M, SONAR_MAX_DIST_M);
+            out.confidence = clamp_f32((snr - 3.0) / 5.0, 0.35, 1.0);
+        } else {
+            out.detected = 0;
+            out.distance_m = 2.5;
+            out.confidence = clamp_f32((snr - 2.0) / 8.0, 0.0, 0.34);
+        }
+        out
+    }
+}
+
+static mut SONAR_MIC_BUF: [f32; SONAR_FRAME_LEN] = [0.0; SONAR_FRAME_LEN];
+static mut SONAR_HP_BUF: [f32; SONAR_FRAME_LEN] = [0.0; SONAR_FRAME_LEN];
+static mut SONAR_STATE: SonarState = SonarState::new();
+static mut SONAR_OUT_BUF: CSonarOutput = CSonarOutput {
+    detected: 0,
+    direct_signal_ok: 0,
+    calibrating: 1,
+    _pad: 0,
+    distance_m: 2.5,
+    snr: 0.0,
+    confidence: 0.0,
+    direct_level: 0.0,
+    profile: [0.0; SONAR_BINS],
+};
+
+#[no_mangle]
+pub unsafe extern "C" fn glidance_sonar_init(sample_rate_hz: f32) {
+    (*core::ptr::addr_of_mut!(SONAR_STATE)).init(sample_rate_hz);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn glidance_sonar_reset_cal() {
+    (*core::ptr::addr_of_mut!(SONAR_STATE)).reset_calibration();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn glidance_sonar_tx_ptr() -> *const f32 {
+    (*core::ptr::addr_of!(SONAR_STATE)).tx_chirp.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn glidance_sonar_mic_ptr() -> *mut f32 {
+    core::ptr::addr_of_mut!(SONAR_MIC_BUF) as *mut f32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn glidance_sonar_out_ptr() -> *const CSonarOutput {
+    core::ptr::addr_of!(SONAR_OUT_BUF)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn glidance_sonar_process() -> i32 {
+    let st = &mut *core::ptr::addr_of_mut!(SONAR_STATE);
+    let mic = &*core::ptr::addr_of!(SONAR_MIC_BUF);
+    let hp = &mut *core::ptr::addr_of_mut!(SONAR_HP_BUF);
+    let res = st.process(mic, hp);
+    *core::ptr::addr_of_mut!(SONAR_OUT_BUF) = res;
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1725,5 +2113,68 @@ mod tests {
         let spread = unsafe { glidance_normalize_depth_inplace(raw_d.as_mut_ptr(), raw_d.len(), &mut ns) };
         assert_eq!(spread, 600);
         assert!(raw_d[0] < 0.05 && raw_d[4095] > 0.95 && raw_d[17] == 0.0);
+    }
+
+    #[test]
+    fn test_ultrasonic_fmcw_glass_door_in_loud_speech() {
+        let fs = 48_000.0f32;
+        let mut st = SonarState::new();
+        st.init(fs);
+        let mut hp = [0.0f32; SONAR_FRAME_LEN];
+
+        let synth_frame = |seed: u32, tau0: usize, glass_dist_m: Option<f32>| -> [f32; SONAR_FRAME_LEN] {
+            let mut buf = [0.0f32; SONAR_FRAME_LEN];
+            // 1. Loud 1kHz human speech interference + white room noise
+            let mut rng = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            for n in 0..SONAR_FRAME_LEN {
+                rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                let noise = (((rng >> 16) as f32) / 65536.0 - 0.5) * 0.004;
+                let speech = 0.85 * sin_f32_nostd(TAU_F32 * 1000.0 * (n as f32) / fs);
+                buf[n] = speech + noise;
+            }
+            // 2. Direct speaker-to-mic path (1.0) + static phone case reflection at lag=95 (~0.42m)
+            for p in 0..2 {
+                let base = tau0 + p * SONAR_PERIOD;
+                for n in 0..SONAR_CHIRP_LEN {
+                    if base + n < SONAR_FRAME_LEN {
+                        buf[base + n] += 1.0 * st.tx_chirp[n];
+                    }
+                    if base + 95 + n < SONAR_FRAME_LEN {
+                        buf[base + 95 + n] += 0.14 * st.tx_chirp[n];
+                    }
+                    if let Some(d_m) = glass_dist_m {
+                        let lag = (((d_m - SONAR_DIRECT_OFFSET_M) * 2.0 * fs) / SONAR_SPEED_OF_SOUND) as usize;
+                        if base + lag + n < SONAR_FRAME_LEN {
+                            buf[base + lag + n] += 0.075 * st.tx_chirp[n];
+                        }
+                    }
+                }
+            }
+            buf
+        };
+
+        // 12 open-air calibration frames (with static phone-case echo + loud 1kHz speech -> MUST NOT false-alarm!)
+        for f in 0..12u32 {
+            let mic = synth_frame(f + 1, 610 + ((f as usize * 37) % 700), None);
+            let out = st.process(&mic, &mut hp);
+            assert_eq!(out.direct_signal_ok, 1);
+            if f >= 10 {
+                assert_eq!(out.detected, 0, "False alarm in open air: snr={}", out.snr);
+            }
+        }
+
+        // Now approach a transparent glass door at 0.86m (amplitude 13x weaker than speaker & 11x weaker than speech!)
+        let mut last = CSonarOutput::default();
+        for f in 0..3u32 {
+            let mic = synth_frame(100 + f, 500 + (f as usize * 113), Some(0.86));
+            last = st.process(&mic, &mut hp);
+        }
+        assert_eq!(last.detected, 1, "Failed to detect glass door echo: snr={}", last.snr);
+        assert!(
+            (last.distance_m - 0.86).abs() <= 0.06,
+            "Expected ~0.86m, got {}m",
+            last.distance_m
+        );
+        assert!(last.snr >= 5.0, "Expected high SNR, got {}", last.snr);
     }
 }
