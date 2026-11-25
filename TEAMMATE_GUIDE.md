@@ -1,69 +1,61 @@
-# Teammate Handoff Guide (Android + Windows Sphere)
+# Teammate Handoff Guide (v2 Core & Windows Presentation Setup)
 
-Welcome! The full working core (FastAPI backend + Depth-Anything-V2 + Ground/Curb Math + React HUD + Benchmark Lab) is already tested and running on `main`.
+Welcome! The full v2 core (FastAPI backend + Metric Depth FP16 + YOLOv8n + Rust SIMD/WASM safety kernel + Lean 4 proofs + Smart Calm Haptics/3D Audio + Rear Camera Switcher) is already merged and running on `main`.
 
-To avoid Git merge conflicts while we polish in parallel, here is **your sphere**, **your files**, and **how to push your changes cleanly**.
+The **midterm presentation server & projector Mission Control** will run on the **Windows laptop (CUDA GPU)**.
 
 ---
 
-## 1. Create Your Feature Branch First
-```bash
+## 1. Sync `main` & Create Your Feature Branch
+```powershell
+git checkout main
 git pull origin main
-git checkout -b feat/android-haptics-and-dataset
+git checkout -b feat/hallway-dataset
 ```
 
 ---
 
-## 2. Your 3 High-Impact Tasks
+## 2. Active Priorities Before the Presentation
 
-### Task A — Capture 20–25 Real Hallway & Stair Photos (Biggest Midterm Boost!)
-Our **Benchmark Lab** already runs 15 synthetic calibration scenes, but showing **real university hallway & staircase photos** in the midterm charts will make our evaluation unbeatable!
-1. Run the app on your Windows laptop (or connect your Android phone to the M4 MacBook over hotspot).
-2. Open the QR code on your **Android Chrome** browser → tap **Start Walking Stream**.
-3. Walk through a hallway/corridor/stairs and tap the **Record Labeled Hallway Snapshot** buttons:
-   - **5× `Clear Floor`** (hold phone at normal walking angle looking slightly down!)
+### Task A — Capture 25–30 Real Hallway & Stair Photos (Issue #6, P0)
+Our **Benchmark Lab** already runs 15 synthetic calibration scenes, but adding **real university hallway & staircase photos** makes our midterm evaluation undeniable!
+1. Start the backend + HTTPS frontend on the **Windows laptop (CUDA server)** and connect your phone over the same Wi-Fi or **Personal Hotspot** (ensure Windows Defender Firewall allows inbound connections on Vite port `:5173`).
+2. Scan the QR code on your phone → tap **Start Walking Stream** (the rear camera is selected automatically).
+3. Expand **Developer Dataset Capture** at the bottom of `MobileWalker` and record at least **25 labeled scenes**:
+   - **6× `Clear Floor`** (empty hallways, varied lighting & natural downward tilt)
    - **5× `Obs Left`** (chair, person, wall corner on the left ~1–2m away)
-   - **5× `Obs Center`** (chair, doorway, pillar, or close wall directly ahead)
-   - **5× `Obs Right`** (desk, person, wall on the right)
-   - **5× `Curb / Step`** (standing ~1–1.5m before stairs going down or a sidewalk curb!)
-4. Your captures are automatically saved inside `backend/data/samples/` (`metadata.json` + `real-*.jpg`). Commit that folder so both laptops have the exact same benchmark dataset!
+   - **6× `Obs Center`** (chair, doorway edge, pillar, or close wall directly ahead)
+   - **5× `Obs Right`** (desk, backpack, person on the right)
+   - **5× `Curb / Step`** (standing ~1–1.5m before stairs going down or an outdoor sidewalk curb)
+4. Captures are saved inside `backend/data/samples/` (`metadata.json` + `real-*.jpg`). Commit that folder via PR so both laptops share the exact same benchmark dataset.
 
-### Task B — Tune Android Haptics & 3D Spatial Audio Feel
-Walk around holding your Android phone (try closing your eyes with a spotter!) and polish the real-world feel in:
-- **`frontend/src/services/haptics.ts`**
-  - Adjust vibration durations (`[95, 55, 95, 55, 160]`) and cooldown intervals (`420ms` vs `700ms`) so `CURB`, `STOP`, `VEER_LEFT`, `VEER_RIGHT`, and `CAUTION` feel instantly distinguishable in your hand without buzzing annoyingly.
-- **`frontend/src/services/spatialAudio.ts`**
-  - Tune sonar frequencies, stereo pan intensity, and voice cue phrasing/speed.
-- **`frontend/src/pages/MobileWalker.tsx`**
-  - Polish button sizes, readability in bright hallways, or add any extra walking UX controls (e.g., an instant Mute All tap area).
-
-### Task C — Stage Demo Choreography & Backup Video
-1. Plan a clean **60-second live obstacle walk** for the classroom presentation (e.g., clear walk → chair left → chair center → step/curb edge).
-2. Record a **30-second screen-recording backup video** of Mission Control + Android walking just in case the classroom projector has an issue.
+### Task B — Stage Demo Choreography & Backup Video (Issue #8, P2)
+1. Verify **Personal Hotspot** connection between the **Windows laptop (CUDA server)** and phone (`< 15 ms` network RTT).
+2. Plan a clean **60-second live obstacle walk** for the classroom presentation (e.g., clear walk → obstacle left → chair center → step/curb edge).
+3. Record a **30-second split-screen backup video** (Projector `Mission Control` + phone walker) in case of venue Wi-Fi or projector issues.
+4. Capture the final `BenchmarkLab` screenshot (Naive vs. Glidance F1, Curb Recall, False-Alarm Rate, P50/P95 Latency) on real scenes for the slides.
 
 ---
 
-## 3. Files You Own vs. Files I Own (Zero Conflicts!)
-- **Your Sphere:**
-  - `frontend/src/services/haptics.ts`
-  - `frontend/src/services/spatialAudio.ts`
-  - `frontend/src/pages/MobileWalker.tsx`
+## 3. Files Ownership (Zero Merge Conflicts)
+- **Windows Laptop / Field Dataset & Demo Sphere:**
   - `backend/data/samples/*`
-- **My Sphere (M4 Vision Tuning + Projector Dashboard):**
-  - `backend/vision/hazard_detector.py` & `backend/schemas.py`
-  - `frontend/src/pages/MissionControl.tsx` & `frontend/src/pages/BenchmarkLab.tsx`
+  - Field tuning (only if needed during rehearsal): `frontend/src/services/haptics.ts`, `frontend/src/services/spatialAudio.ts`
+- **Dashboard & Benchmark Polish Sphere (Issue #4):**
+  - `frontend/src/pages/MissionControl.tsx`
+  - `frontend/src/pages/BenchmarkLab.tsx`
 
 ---
 
 ## 4. Before Pushing Your Work
-Run both quick checks so `main` stays green:
+Run both verification checks so `main` stays green:
 ```powershell
 backend\.venv\Scripts\python -m pytest -v backend/tests/test_hazard_and_api.py
 cd frontend && npm run build
 ```
-Then push your branch and open a Pull Request (or push straight to your branch):
-```bash
+Then push your branch and open a Pull Request:
+```powershell
 git add .
-git commit -m "feat: tune android haptics and add real hallway benchmark dataset"
-git push -u origin feat/android-haptics-and-dataset
+git commit -m "feat(dataset): add real university hallway and stair benchmark samples"
+git push -u origin feat/hallway-dataset
 ```
