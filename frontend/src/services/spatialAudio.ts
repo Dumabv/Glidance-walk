@@ -46,6 +46,21 @@ function getCrispCallout(
     };
   }
   if (guidance.steering === 'STOP') {
+    if (typeof guidance.best_escape_deg === 'number' && Math.abs(guidance.best_escape_deg) >= 25) {
+      const goLeft = guidance.best_escape_deg < 0;
+      return {
+        key: goLeft ? 'STOP_TURN_LEFT' : 'STOP_TURN_RIGHT',
+        text:
+          lang === 'ru'
+            ? goLeft
+              ? 'Стоп, поверни влево'
+              : 'Стоп, поверни вправо'
+            : goLeft
+              ? 'Stop, turn left'
+              : 'Stop, turn right',
+        urgent: true,
+      };
+    }
     return {
       key: 'STOP',
       text: lang === 'ru' ? 'Стоп' : 'Stop',

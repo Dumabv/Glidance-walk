@@ -57,6 +57,29 @@ export interface GuidancePayload {
   wall_override?: boolean;
   lens_blocked?: boolean;
   pitch_deg?: number | null;
+  memory_hint?: string | null;
+  memory_veto?: boolean;
+  best_escape_deg?: number | null;
+}
+
+export interface MemoryCellPoint {
+  gx: number;
+  gy: number;
+  prob: number;
+  isCurb: boolean;
+}
+
+export interface SpatialMemorySnapshot {
+  headingDeg: number;
+  stepCount: number;
+  walkedMeters: number;
+  scannedPercent: number;
+  blindLeftDanger: boolean;
+  blindRightDanger: boolean;
+  bestEscapeDeg: number | null;
+  memoryVetoActive: boolean;
+  memoryHint: string | null;
+  cells: MemoryCellPoint[];
 }
 
 export interface CalibrationConfig {

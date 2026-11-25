@@ -21,10 +21,12 @@ import {
   type GuidanceProfile,
   type VoiceLang,
 } from '../services/spatialAudio';
+import { SpatialMemoryEngine } from '../services/spatialMemory';
 import type {
   ExecutionMode,
   GuidancePayload,
   SampleLabel,
+  SpatialMemorySnapshot,
   SteeringAction,
 } from '../types/telemetry';
 
@@ -108,6 +110,7 @@ export function MobileWalker() {
   const [tiltWarning, setTiltWarning] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [guidance, setGuidance] = useState<GuidancePayload | null>(null);
+  const [memorySnap, setMemorySnap] = useState<SpatialMemorySnapshot | null>(null);
   const [rttMs, setRttMs] = useState<number>(0);
   const [fps, setFps] = useState<number>(0);
   const [videoAspect, setVideoAspect] = useState<'portrait' | 'landscape'>('portrait');
@@ -133,6 +136,7 @@ export function MobileWalker() {
 
   const audioRef = useRef<SpatialAudioEngine | null>(null);
   const hapticsRef = useRef<HapticsEngine | null>(null);
+  const memoryRef = useRef<SpatialMemoryEngine | null>(null);
 
   if (!audioRef.current) {
     audioRef.current = new SpatialAudioEngine();
@@ -142,6 +146,9 @@ export function MobileWalker() {
       (evt) => setLastPulse(evt),
       (rank) => audioRef.current?.playIosTactileClick(rank)
     );
+  }
+  if (!memoryRef.current) {
+    memoryRef.current = new SpatialMemoryEngine();
   }
 
   useEffect(() => {
@@ -169,10 +176,17 @@ export function MobileWalker() {
     audioRef.current?.setVoiceLang(voiceLang);
   }, [voiceLang]);
 
-  const handleIncomingGuidance = useCallback((data: GuidancePayload) => {
+  const handleIncomingGuidance = useCallback((raw: GuidancePayload) => {
     inFlightRef.current = false;
     lastValidFrameAtRef.current = performance.now();
     setSignalLost(false);
+
+    // Fuse narrow 62° frame into 360° rolling Spatial Memory (12 KB RAM, ~0.02ms CPU)
+    const memOut = memoryRef.current?.integrateAndFuse(raw);
+    const data = memOut ? memOut.fused : raw;
+    if (memOut) {
+      setMemorySnap(memOut.snapshot);
+    }
     setGuidance(data);
 
     const now = Date.now();
@@ -277,6 +291,7 @@ export function MobileWalker() {
     setWsConnected(false);
     setSignalLost(false);
     setGuidance(null);
+    setMemorySnap(null);
   }, []);
 
   useEffect(() => {
@@ -298,9 +313,13 @@ export function MobileWalker() {
     };
   }, [acquireWakeLock, stopSession]);
 
-  // IMU DeviceOrientation Pitch/Roll Compensation & Tilt Guard
+  // IMU DeviceOrientation + DeviceMotion (Pitch/Roll Tilt Guard + 360° Spatial Memory Heading & Step Odometry)
   useEffect(() => {
     const onOrientation = (e: DeviceOrientationEvent) => {
+      const compass = (e as DeviceOrientationEvent & { webkitCompassHeading?: number })
+        .webkitCompassHeading;
+      memoryRef.current?.updateOrientation(e.alpha, compass ?? null);
+
       if (e.beta === null || e.gamma === null) return;
       pitchDegRef.current = 0.8 * pitchDegRef.current + 0.2 * e.beta;
       rollDegRef.current = 0.8 * rollDegRef.current + 0.2 * e.gamma;
@@ -315,8 +334,26 @@ export function MobileWalker() {
         setTiltWarning(null);
       }
     };
+
+    const onMotion = (e: DeviceMotionEvent) => {
+      if (!sessionActiveRef.current) return;
+      const acc = e.accelerationIncludingGravity;
+      const dtSec = e.interval ? e.interval / 1000 : 0.016;
+      memoryRef.current?.updateMotion(
+        acc?.x,
+        acc?.y,
+        acc?.z,
+        e.rotationRate?.alpha ?? null,
+        dtSec
+      );
+    };
+
     window.addEventListener('deviceorientation', onOrientation, { passive: true });
-    return () => window.removeEventListener('deviceorientation', onOrientation);
+    window.addEventListener('devicemotion', onMotion, { passive: true });
+    return () => {
+      window.removeEventListener('deviceorientation', onOrientation);
+      window.removeEventListener('devicemotion', onMotion);
+    };
   }, []);
 
   const dispatchFrame = useCallback(() => {
@@ -481,12 +518,18 @@ export function MobileWalker() {
     hapticsRef.current?.triggerTapFeedback();
     audioRef.current?.unlock();
 
-    // Request iOS 13+ IMU orientation permission inside user gesture if available
+    // Request iOS 13+ IMU orientation & motion permissions inside user gesture if available
     const devOrient = DeviceOrientationEvent as unknown as {
       requestPermission?: () => Promise<string>;
     };
     if (typeof devOrient.requestPermission === 'function') {
       void devOrient.requestPermission().catch(() => {});
+    }
+    const devMotion = DeviceMotionEvent as unknown as {
+      requestPermission?: () => Promise<string>;
+    };
+    if (typeof devMotion.requestPermission === 'function') {
+      void devMotion.requestPermission().catch(() => {});
     }
 
     try {
@@ -514,6 +557,7 @@ export function MobileWalker() {
     await acquireWakeLock();
     audioRef.current?.resetSessionState();
     hapticsRef.current?.resetSessionState();
+    memoryRef.current?.reset();
     sessionActiveRef.current = true;
     lastValidFrameAtRef.current = performance.now();
     setStreaming(true);
@@ -927,7 +971,7 @@ export function MobileWalker() {
             <span>RTT: {rttMs} ms</span>
           </div>
         </div>
-        <BirdEyeRadar guidance={guidance} />
+        <BirdEyeRadar guidance={guidance} memory={memorySnap} />
       </div>
 
       {/* Collapsible Developer Hallway Dataset Recorder (prevents accidental palm taps during walking) */}
