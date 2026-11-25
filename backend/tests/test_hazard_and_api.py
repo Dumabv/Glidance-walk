@@ -149,42 +149,45 @@ def test_temporal_debounce_prevents_single_frame_danger_spike() -> None:
     assert second.steering == "STOP"
 
 
-def test_fastapi_endpoints_and_8byte_and_16byte_websocket_protocols() -> None:
+def test_fastapi_endpoints_and_8byte_and_16byte_websocket_protocols(tmp_path) -> None:
     os.environ["GLIDANCE_MOCK_DEPTH"] = "1"
+    from backend.evaluation.dataset_store import DatasetStore
     from backend.main import app, state
 
     state.depth_engine = None  # force mock init
+    orig_store = state.dataset_store
+    state.dataset_store = DatasetStore(data_dir=tmp_path)
+    try:
+        with TestClient(app) as client:
+            r = client.get("/api/health")
+            assert r.status_code == 200
+            hdata = r.json()
+            assert hdata["status"] == "ok"
+            assert hdata["kernel_backend"] == "rust-simd"
 
-    with TestClient(app) as client:
-        r = client.get("/api/health")
-        assert r.status_code == 200
-        hdata = r.json()
-        assert hdata["status"] == "ok"
-        assert hdata["kernel_backend"] == "rust-simd"
+            bench = client.post("/api/benchmark/run")
+            assert bench.status_code == 200
+            data = bench.json()
+            assert data["smart"]["f1"] == 1.0
+            assert data["smart"]["direction_accuracy"] == 1.0
+            assert data["smart"]["false_alarm_rate_clear"] == 0.0
+            assert data["smart"]["curb_recall"] == 1.0
+            assert data["naive"]["curb_recall"] == 0.0
 
-        bench = client.post("/api/benchmark/run")
-        assert bench.status_code == 200
-        data = bench.json()
-        syn_samples = [s for s in data["samples"] if s["source"] == "synthetic"]
-        assert len(syn_samples) == 20
-        assert all(s["smart_correct"] for s in syn_samples)
-        assert data["smart"]["direction_accuracy"] == 1.0
-        assert data["smart"]["false_alarm_rate_clear"] == 0.0
-        assert data["smart"]["curb_recall"] == 1.0
-        assert data["naive"]["curb_recall"] == 0.0
+            # 1. Classic 8-byte binary WebSocket header
+            with client.websocket_connect("/ws/phone") as ws:
+                ts_ms = time.time() * 1000.0
+                payload8 = struct.pack(">d", ts_ms) + _make_jpeg()
+                ws.send_bytes(payload8)
+                reply = ws.receive_json()
+                assert reply["frame_id"] >= 1
+                assert abs(reply["client_ts"] - ts_ms) < 1.0
+                assert reply["kernel_backend"] == "rust-simd"
 
-        # 1. Classic 8-byte binary WebSocket header
-        with client.websocket_connect("/ws/phone") as ws:
-            ts_ms = time.time() * 1000.0
-            payload8 = struct.pack(">d", ts_ms) + _make_jpeg()
-            ws.send_bytes(payload8)
-            reply = ws.receive_json()
-            assert reply["frame_id"] >= 1
-            assert abs(reply["client_ts"] - ts_ms) < 1.0
-            assert reply["kernel_backend"] == "rust-simd"
-
-            # 2. Upgraded 16-byte IMU-enriched binary WebSocket header `[f64 ts][f32 pitch][f32 roll]+JPEG`
-            payload16 = struct.pack(">dff", ts_ms + 50.0, 68.5, -2.0) + _make_jpeg(width=240, height=320)
-            ws.send_bytes(payload16)
-            reply2 = ws.receive_json()
-            assert reply2["pitch_deg"] == 68.5
+                # 2. Upgraded 16-byte IMU-enriched binary WebSocket header `[f64 ts][f32 pitch][f32 roll]+JPEG`
+                payload16 = struct.pack(">dff", ts_ms + 50.0, 68.5, -2.0) + _make_jpeg(width=240, height=320)
+                ws.send_bytes(payload16)
+                reply2 = ws.receive_json()
+                assert reply2["pitch_deg"] == 68.5
+    finally:
+        state.dataset_store = orig_store
