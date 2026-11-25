@@ -1,0 +1,10 @@
+{
+  "name": "Glidance — Verified Depth & Curb Navigator",
+  "short_name": "Glidance",
+  "description": "Real-time monocular depth obstacle & curb detector with 3D HRTF sonar, tactile haptics, and on-phone Rust/WASM safety kernel.",
+  "start_url": "/?mode=mobile",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#070b14",
+  "theme_color": "#070b14"
+}

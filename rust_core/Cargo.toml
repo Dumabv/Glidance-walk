@@ -1,0 +1,16 @@
+[package]
+name = "glidance_core"
+version = "0.2.0"
+edition = "2021"
+description = "Lean-4 verified safety & V-disparity geometry kernel for Glidance (native cdylib + WebAssembly)"
+
+[lib]
+name = "glidance_core"
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

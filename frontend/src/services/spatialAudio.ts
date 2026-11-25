@@ -1,16 +1,139 @@
 import type { GuidancePayload } from '../types/telemetry';
 
+export type GuidanceProfile = 'smart_calm' | 'sonar_3d' | 'tactile_only';
+export type VoiceLang = 'ru' | 'en';
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
 /**
- * 3D stereo sonar pings via Web Audio API StereoPannerNode + debounced speech cues.
- * Works identically on Android Chrome and iPhone Safari (crucial for iOS earbuds testing).
+ * Action-only 1-word aviation/rally callouts.
+ * NEVER mixes two directions in one phrase (eliminates "Obstacle on RIGHT, step LEFT" confusion!).
+ */
+function getCrispCallout(
+  guidance: GuidancePayload,
+  lang: VoiceLang
+): { key: string; text: string; urgent: boolean } | null {
+  const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
+
+  if (guidance.glass_barrier) {
+    return {
+      key: 'GLASS_BARRIER',
+      text: lang === 'ru' ? 'Стекло впереди' : 'Glass ahead',
+      urgent: true,
+    };
+  }
+  if (guidance.lens_blocked) {
+    return {
+      key: 'LENS_BLOCKED',
+      text: lang === 'ru' ? 'Камера закрыта' : 'Camera blocked',
+      urgent: true,
+    };
+  }
+  if (isCurb) {
+    if (guidance.curb.stairs_likely) {
+      return {
+        key: 'STAIRS',
+        text: lang === 'ru' ? 'Лестница вниз' : 'Stairs ahead',
+        urgent: true,
+      };
+    }
+    return {
+      key: 'CURB',
+      text: lang === 'ru' ? 'Ступенька' : 'Step down',
+      urgent: true,
+    };
+  }
+  if (guidance.overhead_hazard && guidance.overall_severity === 'danger') {
+    return {
+      key: 'OVERHEAD',
+      text: lang === 'ru' ? 'Препятствие сверху' : 'Watch head',
+      urgent: true,
+    };
+  }
+  if (guidance.steering === 'STOP') {
+    if (typeof guidance.best_escape_deg === 'number' && Math.abs(guidance.best_escape_deg) >= 25) {
+      const goLeft = guidance.best_escape_deg < 0;
+      return {
+        key: goLeft ? 'STOP_TURN_LEFT' : 'STOP_TURN_RIGHT',
+        text:
+          lang === 'ru'
+            ? goLeft
+              ? 'Стоп, поверни влево'
+              : 'Стоп, поверни вправо'
+            : goLeft
+              ? 'Stop, turn left'
+              : 'Stop, turn right',
+        urgent: true,
+      };
+    }
+    return {
+      key: 'STOP',
+      text: lang === 'ru' ? 'Стоп' : 'Stop',
+      urgent: true,
+    };
+  }
+  if (guidance.steering === 'VEER_LEFT') {
+    const isDanger = guidance.overall_severity === 'danger';
+    return {
+      key: isDanger ? 'DANGER_LEFT' : 'CAUTION_LEFT',
+      text: lang === 'ru' ? 'Левее' : 'Left',
+      urgent: isDanger,
+    };
+  }
+  if (guidance.steering === 'VEER_RIGHT') {
+    const isDanger = guidance.overall_severity === 'danger';
+    return {
+      key: isDanger ? 'DANGER_RIGHT' : 'CAUTION_RIGHT',
+      text: lang === 'ru' ? 'Правее' : 'Right',
+      urgent: isDanger,
+    };
+  }
+  return null;
+}
+
+/**
+ * Calm Event-Driven 3D Binaural HRTF Sonar + Zero-Nag Rally Callout Engine.
+ *
+ * Designed around real blind-navigation HCI principles (Soundscape / TCAS / Rally Co-Driver):
+ * 1. Silence-by-default on clear paths (zero background chatter, preserves natural street hearing).
+ * 2. Edge-Triggered + Closing-Velocity Gate ("Zero Stationary Nag"):
+ *    - Fires immediately (0ms) when a new hazard appears or direction changes.
+ *    - If you stand still or hold the phone steady to inspect a scene, it DOES NOT repeat!
+ *    - Only repeats if you physically move closer (`minDist` drops by >= 0.28m) or after a long
+ *      safety reminder (`6.5s+`) if still walking into `STOP`.
+ * 3. 1-word action callouts (`"Левее"`, `"Правее"`, `"Стоп"`, `"Ступенька"`) in < 350ms, never
+ *    mixing conflicting words like "Obstacle on right, step left".
+ * 4. Stability filter: mild `caution` requires 2 consecutive frames before speaking, and `"Свободно"`
+ *    only plays once after clearing a sustained `DANGER`/`STOP`/`CURB` hazard.
  */
 export class SpatialAudioEngine {
   private ctx: AudioContext | null = null;
+  private compressor: DynamicsCompressorNode | null = null;
+  private profile: GuidanceProfile = 'smart_calm';
   private sonarEnabled = true;
-  private voiceEnabled = false;
+  private voiceEnabled = true;
+  private voiceLang: VoiceLang = 'en';
+
   private lastPingAt = 0;
+  private lastRank = 0;
+
+  // Anti-nag state machine
+  private activeHazardKey = 'CLEAR';
+  private pendingKey = 'CLEAR';
+  private pendingStreak = 0;
+  private hazardStreak = 0;
+  private clearStreak = 0;
+  private hadSustainedDanger = false;
+
+  private lastSpokenKey = 'CLEAR';
   private lastSpokenAt = 0;
-  private lastSpokenCue = '';
+  private minDistAtLastAlert = 99;
+  private sameStatePingCount = 0;
+  private lastDisconnectSpokenAt = 0;
+  private lastDisconnectPingAt = 0;
+  private speakTimer: number | null = null;
 
   public unlock(): void {
     if (typeof window === 'undefined') return;
@@ -21,10 +144,52 @@ export class SpatialAudioEngine {
           .webkitAudioContext;
       if (AudioCtx) {
         this.ctx = new AudioCtx();
+        const comp = this.ctx.createDynamicsCompressor();
+        comp.threshold.setValueAtTime(-6, this.ctx.currentTime);
+        comp.knee.setValueAtTime(12, this.ctx.currentTime);
+        comp.ratio.setValueAtTime(12, this.ctx.currentTime);
+        comp.attack.setValueAtTime(0.003, this.ctx.currentTime);
+        comp.release.setValueAtTime(0.15, this.ctx.currentTime);
+        comp.connect(this.ctx.destination);
+        this.compressor = comp;
       }
     }
     if (this.ctx && this.ctx.state === 'suspended') {
       void this.ctx.resume();
+    }
+  }
+
+  public dispose(): void {
+    if (this.speakTimer !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.speakTimer);
+      this.speakTimer = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (this.ctx) {
+      void this.ctx.close().catch(() => {});
+      this.ctx = null;
+      this.compressor = null;
+    }
+  }
+
+  public resetSessionState(): void {
+    this.activeHazardKey = 'CLEAR';
+    this.pendingKey = 'CLEAR';
+    this.pendingStreak = 0;
+    this.hazardStreak = 0;
+    this.clearStreak = 0;
+    this.hadSustainedDanger = false;
+    this.lastSpokenKey = 'CLEAR';
+    this.minDistAtLastAlert = 99;
+    this.sameStatePingCount = 0;
+  }
+
+  public setProfile(profile: GuidanceProfile): void {
+    this.profile = profile;
+    if (profile === 'tactile_only' && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
     }
   }
 
@@ -39,101 +204,477 @@ export class SpatialAudioEngine {
     }
   }
 
+  public setVoiceLang(lang: VoiceLang): void {
+    this.voiceLang = lang;
+  }
+
+  public isVoiceEnabled(): boolean {
+    return this.voiceEnabled && this.profile !== 'tactile_only';
+  }
+
+  /** Crisp 125Hz sub-bass tactile click fallback for iOS devices lacking `navigator.vibrate` */
+  public playIosTactileClick(rank: number): void {
+    if (!this.sonarEnabled || this.profile === 'tactile_only') return;
+    this.unlock();
+    if (!this.ctx || !this.compressor) return;
+    const t0 = this.ctx.currentTime;
+    const gainVal = rank >= 3 ? 0.22 : 0.12;
+    this.schedule3DPing({
+      startTime: t0,
+      freqStart: 135,
+      freqEnd: 95,
+      durationSec: 0.03,
+      posX: 0,
+      posY: -0.2,
+      posZ: -0.7,
+      volume: gainVal,
+      cutoffHz: 420,
+    });
+  }
+
   public playTestSonar(): void {
     this.unlock();
-    this.playTone(540, 0.12, -0.8, 0.14);
-    setTimeout(() => this.playTone(720, 0.12, 0.8, 0.14), 160);
+    if (!this.ctx) return;
+    const t0 = this.ctx.currentTime;
+    this.schedule3DPing({
+      startTime: t0,
+      freqStart: 520,
+      freqEnd: 520,
+      durationSec: 0.1,
+      posX: -1.0,
+      posY: 0,
+      posZ: -1.1,
+      volume: 0.15,
+      cutoffHz: 2200,
+    });
+    this.schedule3DPing({
+      startTime: t0 + 0.14,
+      freqStart: 740,
+      freqEnd: 740,
+      durationSec: 0.1,
+      posX: 1.0,
+      posY: 0,
+      posZ: -1.1,
+      volume: 0.15,
+      cutoffHz: 2600,
+    });
+  }
+
+  public triggerDisconnectAlarm(kind: 'camera_dead' | 'signal_delayed'): void {
+    if (this.profile === 'tactile_only') return;
+    const now = performance.now();
+
+    // Cooldown prevents 250ms watchdog loop from machine-gunning alarms!
+    if (this.sonarEnabled && now - this.lastDisconnectPingAt >= 3200) {
+      this.lastDisconnectPingAt = now;
+      this.lastRank = 5;
+      this.unlock();
+      if (this.ctx) {
+        const t0 = this.ctx.currentTime;
+        this.schedule3DPing({
+          startTime: t0,
+          freqStart: 520,
+          freqEnd: 360,
+          durationSec: 0.16,
+          posX: 0,
+          posY: -0.2,
+          posZ: -0.7,
+          volume: 0.18,
+          cutoffHz: 2000,
+        });
+      }
+    }
+
+    if (this.voiceEnabled && now - this.lastDisconnectSpokenAt >= 7500) {
+      this.lastDisconnectSpokenAt = now;
+      const msg =
+        kind === 'camera_dead'
+          ? this.voiceLang === 'ru'
+            ? 'Камера отключена'
+            : 'Camera lost'
+          : this.voiceLang === 'ru'
+            ? 'Слабая связь'
+            : 'Weak signal';
+      this.speakNow(msg, true, false);
+    }
+  }
+
+  public speakStatusImmediate(guidance: GuidancePayload | null, signalLost: boolean): void {
+    let text: string;
+    if (signalLost) {
+      text = this.voiceLang === 'ru' ? 'Связь потеряна. Подождите.' : 'Signal lost. Wait.';
+    } else if (!guidance) {
+      text = this.voiceLang === 'ru' ? 'Готов к работе' : 'Ready to walk';
+    } else {
+      const minDist = Math.min(
+        guidance.left.min_distance_m,
+        guidance.center.min_distance_m,
+        guidance.right.min_distance_m
+      ).toFixed(1);
+      const callout = getCrispCallout(guidance, this.voiceLang);
+      text = callout
+        ? this.voiceLang === 'ru'
+          ? `${callout.text}. ${minDist} метра`
+          : `${callout.text}. ${minDist} meters`
+        : this.voiceLang === 'ru'
+          ? `Свободно. ${minDist} метра`
+          : `Clear. ${minDist} meters`;
+    }
+    this.speakNow(text, true, true);
   }
 
   public handleGuidance(guidance: GuidancePayload): void {
+    if (this.profile === 'tactile_only') return;
+
     const now = performance.now();
+    const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
+    const minDist = Math.min(
+      guidance.left.min_distance_m,
+      guidance.center.min_distance_m,
+      guidance.right.min_distance_m
+    );
 
-    if (this.sonarEnabled && guidance.overall_severity !== 'clear') {
-      const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
-      const minInterval = isCurb
-        ? 450
-        : guidance.overall_severity === 'danger'
-          ? 420
-          : 780;
+    // 1. CLEAR PATH: 100% calm silence (only say a soft "Clear" once after leaving sustained danger!)
+    if (guidance.overall_severity === 'clear' && !isCurb) {
+      this.lastRank = 0;
+      this.clearStreak += 1;
 
-      if (now - this.lastPingAt >= minInterval) {
-        this.lastPingAt = now;
-        this.unlock();
+      if (this.clearStreak >= 3) {
+        if (
+          this.hadSustainedDanger &&
+          this.voiceEnabled &&
+          now - this.lastSpokenAt >= 1200
+        ) {
+          this.hadSustainedDanger = false;
+          // Gentle ascending two-note "all clear" chime instead of verbose chatter, or 1 soft word
+          if (this.sonarEnabled) {
+            this.playAllClearChime();
+          } else {
+            this.speakNow(this.voiceLang === 'ru' ? 'Свободно' : 'Clear', false, false);
+          }
+          this.lastSpokenKey = 'CLEAR';
+          this.lastSpokenAt = now;
+        }
+        this.activeHazardKey = 'CLEAR';
+        this.hazardStreak = 0;
+        this.sameStatePingCount = 0;
+        this.minDistAtLastAlert = 99;
+      }
+      return;
+    }
 
-        if (isCurb) {
-          // Descending dual tone = step DOWN ahead
-          this.playTone(660, 0.09, 0.0, 0.18);
-          setTimeout(() => this.playTone(310, 0.15, 0.0, 0.2), 100);
-        } else {
-          // Pan toward the obstacle so user senses direction (left=-0.85, right=+0.85)
-          const pan = this.computeObstaclePan(guidance);
-          const freq = guidance.overall_severity === 'danger' ? 880 : 490;
-          const dur = guidance.overall_severity === 'danger' ? 0.1 : 0.08;
-          this.playTone(freq, dur, pan, 0.16);
+    this.clearStreak = 0;
+    const callout = getCrispCallout(guidance, this.voiceLang);
+    const nextKey = callout?.key ?? `${guidance.overall_severity}:${guidance.steering}`;
+    const isUrgent =
+      isCurb || guidance.steering === 'STOP' || guidance.overall_severity === 'danger';
+
+    // 2. Stability debounce: urgent hazards trigger immediately; mild caution needs 2 frames
+    if (nextKey === this.pendingKey) {
+      this.pendingStreak += 1;
+    } else {
+      this.pendingKey = nextKey;
+      this.pendingStreak = 1;
+    }
+    if (!isUrgent && this.pendingStreak < 2) {
+      return;
+    }
+
+    const stateChanged = nextKey !== this.activeHazardKey;
+    if (stateChanged) {
+      this.activeHazardKey = nextKey;
+      this.sameStatePingCount = 0;
+      this.minDistAtLastAlert = minDist;
+    }
+
+    if (isUrgent) {
+      this.hazardStreak += 1;
+      if (this.hazardStreak >= 3) {
+        this.hadSustainedDanger = true;
+      }
+    }
+
+    // Did the user physically walk closer by >= 28cm since the last alert?
+    const movedCloser = this.minDistAtLastAlert - minDist >= 0.28;
+
+    // 3. 3D HRTF Sonar:
+    //    - In `smart_calm`: completely silent on mild `caution` (haptics handles it!),
+    //      fires once on new urgent state or closing distance, then backs off cleanly when stationary!
+    //    - In `sonar_3d`: continuous distance radar with gentle stationary backoff.
+    if (this.sonarEnabled) {
+      const skipMildCautionInCalm =
+        this.profile === 'smart_calm' && !isUrgent && guidance.overall_severity === 'caution';
+
+      if (!skipMildCautionInCalm) {
+        const rank = isCurb ? 4 : guidance.steering === 'STOP' ? 3 : isUrgent ? 2 : 1;
+        const baseInterval = isCurb
+          ? 650
+          : Math.round(clamp(220 + 260 * Math.pow(clamp(minDist, 0.35, 3.5), 1.25), 260, 1100));
+
+        // Exponential anti-nag backoff when standing still looking at the same object!
+        const stationaryBackoff =
+          this.profile === 'smart_calm'
+            ? Math.min(8000, baseInterval * Math.pow(2.1, Math.min(4, this.sameStatePingCount)))
+            : Math.min(2600, baseInterval * (this.sameStatePingCount >= 4 ? 1.8 : 1.0));
+
+        const shouldPing =
+          stateChanged ||
+          rank > this.lastRank ||
+          (movedCloser && now - this.lastPingAt >= 350) ||
+          (this.profile === 'sonar_3d' && now - this.lastPingAt >= stationaryBackoff) ||
+          (this.profile === 'smart_calm' &&
+            this.sameStatePingCount < 2 &&
+            now - this.lastPingAt >= stationaryBackoff);
+
+        if (shouldPing) {
+          this.lastPingAt = now;
+          this.lastRank = rank;
+          this.sameStatePingCount += 1;
+          if (movedCloser) {
+            this.minDistAtLastAlert = minDist;
+          }
+          this.emitSpatialEarcon(guidance, isCurb, minDist);
         }
       }
     }
 
-    if (
-      this.voiceEnabled &&
-      guidance.spoken_cue &&
-      typeof window !== 'undefined' &&
-      'speechSynthesis' in window
-    ) {
-      const cueChanged = guidance.spoken_cue !== this.lastSpokenCue;
-      const cooldown = guidance.overall_severity === 'danger' ? 2000 : 3500;
-      if (
-        (cueChanged && now - this.lastSpokenAt >= 1200) ||
-        (guidance.overall_severity === 'danger' && now - this.lastSpokenAt >= cooldown)
-      ) {
-        this.lastSpokenAt = now;
-        this.lastSpokenCue = guidance.spoken_cue;
-        window.speechSynthesis.cancel();
-        const utter = new SpeechSynthesisUtterance(guidance.spoken_cue);
-        utter.rate = 1.15;
-        utter.lang = 'en-US';
-        window.speechSynthesis.speak(utter);
+    // 4. Voice Callouts (Zero-Nag Rally Co-Driver):
+    //    - In `smart_calm`: ONLY speaks on URGENT hazards (`DANGER`, `STOP`, `CURB`, `LENS_BLOCKED`),
+    //      NEVER nags on mild `caution` walls!
+    //    - Speaks ONCE when entering a new hazard state, and NEVER repeats while standing still
+    //      unless you walk >= 32cm closer OR stay in `STOP` after 7.5 seconds!
+    if (this.voiceEnabled && callout) {
+      const allowVoiceForSeverity =
+        this.profile === 'sonar_3d' ? true : callout.urgent;
+
+      if (allowVoiceForSeverity) {
+        const isNewSpokenState = callout.key !== this.lastSpokenKey;
+        const minGapMs = callout.urgent ? 1350 : 2800;
+        const approachedSignificantly =
+          this.minDistAtLastAlert - minDist >= 0.32 && now - this.lastSpokenAt >= 1800;
+        const rareSafetyReminder =
+          (guidance.steering === 'STOP' || isCurb) &&
+          minDist <= 1.0 &&
+          now - this.lastSpokenAt >= 7500;
+
+        if (
+          (isNewSpokenState && now - this.lastSpokenAt >= minGapMs) ||
+          (isNewSpokenState && callout.urgent && this.lastSpokenKey === 'CLEAR') ||
+          approachedSignificantly ||
+          rareSafetyReminder
+        ) {
+          this.lastSpokenKey = callout.key;
+          this.minDistAtLastAlert = minDist;
+          this.speakNow(callout.text, callout.urgent, false);
+        }
       }
     }
   }
 
-  private computeObstaclePan(guidance: GuidancePayload): number {
+  private playAllClearChime(): void {
+    this.unlock();
+    if (!this.ctx) return;
+    const t0 = this.ctx.currentTime;
+    this.schedule3DPing({
+      startTime: t0,
+      freqStart: 440,
+      freqEnd: 587,
+      durationSec: 0.085,
+      posX: 0,
+      posY: 0.1,
+      posZ: -1.4,
+      volume: 0.08,
+      cutoffHz: 1600,
+    });
+  }
+
+  private emitSpatialEarcon(
+    guidance: GuidancePayload,
+    isCurb: boolean,
+    minDist: number
+  ): void {
+    this.unlock();
+    if (!this.ctx) return;
+    const t0 = this.ctx.currentTime;
+
+    if (isCurb) {
+      this.schedule3DPing({
+        startTime: t0,
+        freqStart: 660,
+        freqEnd: 240,
+        durationSec: 0.19,
+        posX: 0,
+        posY: -0.85,
+        posZ: -0.9,
+        volume: 0.2,
+        cutoffHz: 2200,
+      });
+      return;
+    }
+
+    const posX = this.computeObstacleX(guidance);
+    const posY = guidance.overhead_hazard ? 0.75 : 0.0;
+    const posZ = -clamp(minDist, 0.4, 3.6);
+    const freq = Math.round(880 - 150 * clamp(minDist, 0.4, 3.2));
+    const isDanger = guidance.overall_severity === 'danger';
+
+    this.schedule3DPing({
+      startTime: t0,
+      freqStart: freq,
+      freqEnd: freq,
+      durationSec: isDanger ? 0.095 : 0.065,
+      posX,
+      posY,
+      posZ,
+      volume: isDanger ? 0.16 : 0.09,
+      cutoffHz: isDanger ? 2600 : 1600,
+    });
+
+    if (guidance.steering === 'VEER_LEFT' || guidance.steering === 'VEER_RIGHT') {
+      const safeX = guidance.steering === 'VEER_LEFT' ? -0.85 : 0.85;
+      this.schedule3DPing({
+        startTime: t0 + 0.09,
+        freqStart: 528,
+        freqEnd: 528,
+        durationSec: 0.06,
+        posX: safeX,
+        posY: 0.05,
+        posZ: -1.4,
+        volume: 0.06,
+        cutoffHz: 1400,
+      });
+    }
+  }
+
+  private speakNow(
+    text: string,
+    urgent: boolean,
+    forceEvenIfMuted: boolean
+  ): void {
+    if (
+      (!this.voiceEnabled && !forceEvenIfMuted) ||
+      typeof window === 'undefined' ||
+      !('speechSynthesis' in window)
+    ) {
+      return;
+    }
+    this.lastSpokenAt = performance.now();
+
+    const synth = window.speechSynthesis;
+    const langTag = this.voiceLang === 'ru' ? 'ru-RU' : 'en-US';
+
+    if (urgent || forceEvenIfMuted) {
+      synth.cancel();
+      if (this.speakTimer !== null) {
+        window.clearTimeout(this.speakTimer);
+      }
+      this.speakTimer = window.setTimeout(() => {
+        this.speakTimer = null;
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = langTag;
+        utter.rate = this.voiceLang === 'ru' ? 1.18 : 1.2;
+        synth.speak(utter);
+      }, 45);
+    } else if (!synth.speaking) {
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = langTag;
+      utter.rate = 1.12;
+      synth.speak(utter);
+    }
+  }
+
+  private computeObstacleX(guidance: GuidancePayload): number {
     if (guidance.steering === 'STOP' || guidance.center.severity === 'danger') {
       return 0.0;
     }
     const diff = guidance.right.obstacle_score - guidance.left.obstacle_score;
-    return Math.max(-0.9, Math.min(0.9, diff * 2.0));
+    return clamp(diff * 2.2, -1.15, 1.15);
   }
 
-  private playTone(
-    freq: number,
-    durationSec: number,
-    pan: number,
-    volume: number
-  ): void {
-    if (!this.ctx) return;
-    const now = this.ctx.currentTime;
+  private schedule3DPing(opts: {
+    startTime: number;
+    freqStart: number;
+    freqEnd: number;
+    durationSec: number;
+    posX: number;
+    posY: number;
+    posZ: number;
+    volume: number;
+    cutoffHz: number;
+  }): void {
+    if (!this.ctx || !this.compressor) return;
+    const {
+      startTime,
+      freqStart,
+      freqEnd,
+      durationSec,
+      posX,
+      posY,
+      posZ,
+      volume,
+      cutoffHz,
+    } = opts;
+
     const osc = this.ctx.createOscillator();
+    const filter = this.ctx.createBiquadFilter();
     const gain = this.ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(freq, now);
 
-    gain.gain.setValueAtTime(0.001, now);
-    gain.gain.exponentialRampToValueAtTime(volume, now + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + durationSec);
-
-    if (typeof this.ctx.createStereoPanner === 'function') {
-      const panner = this.ctx.createStereoPanner();
-      panner.pan.setValueAtTime(pan, now);
-      osc.connect(gain);
-      gain.connect(panner);
-      panner.connect(this.ctx.destination);
-    } else {
-      osc.connect(gain);
-      gain.connect(this.ctx.destination);
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(Math.max(40, freqStart), startTime);
+    if (Math.abs(freqEnd - freqStart) > 1) {
+      osc.frequency.exponentialRampToValueAtTime(
+        Math.max(40, freqEnd),
+        startTime + durationSec
+      );
     }
 
-    osc.start(now);
-    osc.stop(now + durationSec + 0.02);
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(cutoffHz, startTime);
+
+    gain.gain.setValueAtTime(0.0008, startTime);
+    gain.gain.exponentialRampToValueAtTime(
+      Math.max(0.002, volume),
+      startTime + Math.min(0.012, durationSec * 0.35)
+    );
+    gain.gain.exponentialRampToValueAtTime(0.0008, startTime + durationSec);
+
+    osc.connect(filter);
+    filter.connect(gain);
+
+    let spatialNode: AudioNode | null = null;
+    if (typeof this.ctx.createPanner === 'function') {
+      const panner = this.ctx.createPanner();
+      panner.panningModel = 'HRTF';
+      panner.distanceModel = 'inverse';
+      panner.refDistance = 0.8;
+      panner.maxDistance = 8.0;
+      panner.rolloffFactor = 1.1;
+      if (panner.positionX) {
+        panner.positionX.setValueAtTime(posX, startTime);
+        panner.positionY.setValueAtTime(posY, startTime);
+        panner.positionZ.setValueAtTime(posZ, startTime);
+      } else {
+        panner.setPosition(posX, posY, posZ);
+      }
+      gain.connect(panner);
+      panner.connect(this.compressor);
+      spatialNode = panner;
+    } else {
+      gain.connect(this.compressor);
+    }
+
+    osc.onended = () => {
+      try {
+        osc.disconnect();
+        filter.disconnect();
+        gain.disconnect();
+        spatialNode?.disconnect();
+      } catch {
+        // Ignore already-disconnected nodes
+      }
+    };
+
+    osc.start(startTime);
+    osc.stop(startTime + durationSec + 0.015);
   }
 }

@@ -14,6 +14,8 @@ export type SampleLabel =
   | 'obstacle_right'
   | 'curb_drop';
 
+export type ExecutionMode = 'auto' | 'tethered' | 'on_phone';
+
 export interface ZoneMetrics {
   severity: Severity;
   obstacle_score: number;
@@ -26,6 +28,7 @@ export interface CurbMetrics {
   confidence: number;
   drop_row_ratio: number;
   gradient_peak: number;
+  stairs_likely?: boolean;
 }
 
 export interface LatencyBreakdown {
@@ -49,6 +52,77 @@ export interface GuidancePayload {
   latency: LatencyBreakdown;
   device: string;
   model_name: string;
+  kernel_backend?: string;
+  overhead_hazard?: boolean;
+  wall_override?: boolean;
+  lens_blocked?: boolean;
+  pitch_deg?: number | null;
+  memory_hint?: string | null;
+  memory_veto?: boolean;
+  best_escape_deg?: number | null;
+  glass_barrier?: boolean;
+  ultrasonic_dist_m?: number | null;
+}
+
+export type UltrasonicSurface =
+  | 'open_space'
+  | 'flat_wall_or_glass'
+  | 'furniture_or_corner'
+  | 'narrow_hallway';
+
+export type UltrasonicZone = 'clear' | 'danger' | 'approach' | 'far';
+
+export interface UltrasonicReading {
+  active: boolean;
+  calibrating: boolean;
+  signalOk: boolean;
+  detected: boolean;
+  distanceM: number;
+  snr: number;
+  confidence: number;
+  directLevel: number;
+  sampleRate: number;
+  profile64: number[];
+  // Smart acoustic scene interpretation
+  surface: UltrasonicSurface;
+  surfaceLabel: string;
+  zone: UltrasonicZone;
+  approachMps: number; // negative = approaching fast!
+  roomReverb: 'open' | 'room' | 'enclosed';
+  peakWidthCm: number;
+}
+
+export type ElevationBand = 'down' | 'mid' | 'up' | 'sonar';
+
+export interface MemoryCellPoint {
+  gx: number;
+  gy: number;
+  prob: number;
+  isCurb: boolean;
+  band: ElevationBand;
+}
+
+export interface SpatialMemorySnapshot {
+  headingDeg: number;
+  pitchDeg: number;
+  cameraBand: ElevationBand;
+  stepCount: number;
+  walkedMeters: number;
+  scannedPercent: number;
+  upClear: boolean;
+  midClear: boolean;
+  downClear: boolean;
+  upSeen: boolean;
+  midSeen: boolean;
+  downSeen: boolean;
+  filteredFlickers: number;
+  motionGated: boolean;
+  blindLeftDanger: boolean;
+  blindRightDanger: boolean;
+  bestEscapeDeg: number | null;
+  memoryVetoActive: boolean;
+  memoryHint: string | null;
+  cells: MemoryCellPoint[];
 }
 
 export interface CalibrationConfig {

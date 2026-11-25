@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
+from contextlib import asynccontextmanager
 import json
 import os
 import socket
 import struct
+import threading
 import time
-from contextlib import asynccontextmanager
 from typing import Any
 
 import numpy as np
@@ -33,7 +35,7 @@ from backend.vision.hazard_detector import GroundAwareHazardDetector
 
 
 def get_lan_ip() -> str:
-    """Finds the Mac's active Wi-Fi / Personal Hotspot IPv4 address for mobile QR connect."""
+    """Finds the active Wi-Fi / Personal Hotspot IPv4 address for mobile QR connect."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
@@ -56,16 +58,25 @@ class SimulateSceneRequest(BaseModel):
 
 class AppState:
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self.depth_engine: DepthEngine | None = None
         self.config = CalibrationConfig()
-        self.detector = GroundAwareHazardDetector(config=self.config)
+        self.sim_detector = GroundAwareHazardDetector(config=self.config)
+        self.active_phone_detectors: dict[int, GroundAwareHazardDetector] = {}
+        self.next_conn_id: int = 1
         self.dataset_store = DatasetStore()
         self.dashboard_clients: set[WebSocket] = set()
         self.frame_counter: int = 0
-        self.phone_connected: bool = False
         self.last_raw_jpeg: bytes | None = None
         self.last_guidance: GuidancePayload | None = None
-        self.recent_latencies_ms: list[float] = []
+        self.recent_latencies_ms: deque[float] = deque(maxlen=120)
+        self.last_dashboard_push_at: float = 0.0
+        self.dashboard_push_in_flight: bool = False
+
+    @property
+    def phone_connected(self) -> bool:
+        with self._lock:
+            return len(self.active_phone_detectors) > 0
 
 
 state = AppState()
@@ -86,7 +97,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Glidance Vision & Haptics Backend",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -116,13 +127,17 @@ async def broadcast_dashboard(message: dict[str, Any]) -> None:
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     engine = ensure_engine()
-    lat = state.recent_latencies_ms
+    with state._lock:
+        lat = list(state.recent_latencies_ms)
+        frames = state.frame_counter
     return {
         "status": "ok",
         "device": engine.device,
+        "runtime": engine.runtime,
+        "kernel_backend": state.sim_detector.kernel_backend,
         "model_name": engine.model_id,
         "phone_connected": state.phone_connected,
-        "frames_processed": state.frame_counter,
+        "frames_processed": frames,
         "p50_server_ms": round(float(np.percentile(lat, 50)), 2) if lat else 0.0,
         "p95_server_ms": round(float(np.percentile(lat, 95)), 2) if lat else 0.0,
     }
@@ -146,9 +161,13 @@ def get_calibration() -> CalibrationConfig:
 
 @app.put("/api/calibration", response_model=CalibrationConfig)
 def update_calibration(cfg: CalibrationConfig) -> CalibrationConfig:
-    state.config = cfg
-    state.detector.update_config(cfg)
-    return state.config
+    with state._lock:
+        state.config = cfg
+        state.sim_detector.update_config(cfg)
+        detectors = list(state.active_phone_detectors.values())
+    for det in detectors:
+        det.update_config(cfg)
+    return cfg
 
 
 @app.get("/api/samples", response_model=list[SampleRecord])
@@ -162,8 +181,9 @@ def save_sample(req: SaveSampleRequest) -> SampleRecord:
     if req.image_b64:
         b64_clean = req.image_b64.split(",")[-1]
         raw_bytes = base64.b64decode(b64_clean)
-    elif state.last_raw_jpeg is not None:
-        raw_bytes = state.last_raw_jpeg
+    else:
+        with state._lock:
+            raw_bytes = state.last_raw_jpeg
 
     if not raw_bytes:
         raise HTTPException(
@@ -203,7 +223,7 @@ def list_demo_scenes() -> list[dict[str, str]]:
 
 @app.post("/api/demo-scenes/simulate", response_model=GuidancePayload)
 async def simulate_demo_scene(req: SimulateSceneRequest) -> GuidancePayload:
-    """Lets Mission Control preview any hallway/curb scenario live without needing a phone."""
+    """Lets Mission Control preview any hallway/curb/edge scenario live without needing a phone."""
     engine = ensure_engine()
     scenes = {s.sample_id: s for s in build_synthetic_calibration_suite()}
     scene = scenes.get(req.scene_id)
@@ -211,10 +231,17 @@ async def simulate_demo_scene(req: SimulateSceneRequest) -> GuidancePayload:
         raise HTTPException(status_code=404, detail="Demo scene not found")
 
     now = time.time()
-    state.frame_counter += 1
-    res = state.detector.analyze(scene.closeness_map, stateful=False)
+    res = state.sim_detector.analyze(
+        scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=scene.raw_spread_milli,
+    )
+    with state._lock:
+        state.frame_counter += 1
+        fid = state.frame_counter
+
     guidance = GuidancePayload(
-        frame_id=state.frame_counter,
+        frame_id=fid,
         client_ts=now * 1000.0,
         server_ts=now * 1000.0,
         overall_severity=res.overall_severity,
@@ -232,9 +259,14 @@ async def simulate_demo_scene(req: SimulateSceneRequest) -> GuidancePayload:
         ),
         device=engine.device,
         model_name=engine.model_id,
+        kernel_backend=res.kernel_backend,
+        overhead_hazard=res.overhead_hazard,
+        wall_override=res.wall_override,
+        lens_blocked=res.lens_blocked,
     )
     depth_jpg = render_depth_overlay_jpeg(scene.closeness_map, guidance)
-    state.last_guidance = guidance
+    with state._lock:
+        state.last_guidance = guidance
     await broadcast_dashboard(
         {
             "type": "telemetry",
@@ -248,25 +280,63 @@ async def simulate_demo_scene(req: SimulateSceneRequest) -> GuidancePayload:
     return guidance
 
 
-def _process_frame_sync(
-    jpeg_bytes: bytes, client_ts: float
-) -> tuple[GuidancePayload, bytes]:
+def _parse_phone_ws_message(msg: dict[str, Any]) -> tuple[bytes | None, float, float]:
+    """Parses 8-byte classic header `[f64 ts]+JPEG`, 16-byte IMU header `[f64 ts][f32 pitch][f32 roll]+JPEG`, or JSON."""
+    client_ts = time.time() * 1000.0
+    pitch_deg = 0.0
+
+    if "bytes" in msg and msg["bytes"]:
+        raw: bytes = msg["bytes"]
+        # 16-byte IMU-enriched binary frame: JPEG SOI `0xFF 0xD8` starts at offset 16
+        if len(raw) > 18 and raw[16:18] == b"\xff\xd8":
+            client_ts, pitch_deg, _roll_deg = struct.unpack(">dff", raw[:16])
+            return raw[16:], client_ts, pitch_deg
+        # Classic 8-byte binary frame: `[f64 client_ts] + JPEG`
+        if len(raw) > 8:
+            client_ts = struct.unpack(">d", raw[:8])[0]
+            return raw[8:], client_ts, 0.0
+    elif "text" in msg and msg["text"]:
+        parsed = json.loads(msg["text"])
+        if "frame_b64" in parsed:
+            jpeg_bytes = base64.b64decode(parsed["frame_b64"].split(",")[-1])
+            client_ts = float(parsed.get("client_ts", client_ts))
+            pitch_deg = float(parsed.get("pitch_deg", 0.0))
+            return jpeg_bytes, client_ts, pitch_deg
+
+    return None, client_ts, pitch_deg
+
+
+def _process_frame_critical_path(
+    detector: GroundAwareHazardDetector,
+    jpeg_bytes: bytes,
+    client_ts: float,
+    pitch_deg: float,
+) -> tuple[GuidancePayload, np.ndarray]:
+    """Critical phone haptic loop — skips dashboard JPEG overlay encoding completely!"""
     engine = ensure_engine()
     t_total = time.perf_counter()
 
-    img, decode_ms = engine.decode_jpeg(jpeg_bytes)
-    closeness, inference_ms = engine.predict_pil(img)
-    haz = state.detector.analyze(closeness, stateful=True)
+    dec = engine.decode_frame(jpeg_bytes)
+    pred = engine.predict_rgb(dec.rgb, dec.luma_mean, dec.luma_std)
+    haz = detector.analyze(
+        pred.closeness,
+        stateful=True,
+        raw_spread_milli=pred.raw_spread_milli,
+        luma_mean=pred.luma_mean,
+        luma_std=pred.luma_std,
+        pitch_deg=pitch_deg,
+        frame_fresh=True,
+    )
     server_total_ms = (time.perf_counter() - t_total) * 1000.0
 
-    state.frame_counter += 1
-    state.last_raw_jpeg = jpeg_bytes
-    state.recent_latencies_ms.append(server_total_ms)
-    if len(state.recent_latencies_ms) > 120:
-        state.recent_latencies_ms.pop(0)
+    with state._lock:
+        state.frame_counter += 1
+        fid = state.frame_counter
+        state.last_raw_jpeg = jpeg_bytes
+        state.recent_latencies_ms.append(server_total_ms)
 
-    guidance = GuidancePayload(
-        frame_id=state.frame_counter,
+    guidance = GuidancePayload.model_construct(
+        frame_id=fid,
         client_ts=client_ts,
         server_ts=time.time() * 1000.0,
         overall_severity=haz.overall_severity,
@@ -276,25 +346,35 @@ def _process_frame_sync(
         center=haz.center,
         right=haz.right,
         curb=haz.curb,
-        latency=LatencyBreakdown(
-            decode_ms=round(decode_ms, 2),
-            inference_ms=round(inference_ms, 2),
-            hazard_ms=round(haz.hazard_ms, 2),
+        latency=LatencyBreakdown.model_construct(
+            decode_ms=round(dec.decode_ms, 2),
+            inference_ms=round(pred.inference_ms, 2),
+            hazard_ms=round(haz.hazard_ms, 3),
             server_total_ms=round(server_total_ms, 2),
         ),
         device=engine.device,
         model_name=engine.model_id,
+        kernel_backend=haz.kernel_backend,
+        overhead_hazard=haz.overhead_hazard,
+        wall_override=haz.wall_override,
+        lens_blocked=haz.lens_blocked,
+        pitch_deg=round(pitch_deg, 1) if pitch_deg != 0.0 else None,
     )
-    state.last_guidance = guidance
-    depth_jpeg = render_depth_overlay_jpeg(closeness, guidance)
-    return guidance, depth_jpeg
+    with state._lock:
+        state.last_guidance = guidance
+    return guidance, pred.closeness
 
 
 @app.websocket("/ws/phone")
 async def phone_stream_ws(websocket: WebSocket) -> None:
     await websocket.accept()
-    state.phone_connected = True
-    state.detector.reset()
+
+    with state._lock:
+        conn_id = state.next_conn_id
+        state.next_conn_id += 1
+        detector = GroundAwareHazardDetector(config=state.config)
+        state.active_phone_detectors[conn_id] = detector
+
     await broadcast_dashboard({"type": "status", "phone_connected": True})
 
     try:
@@ -302,67 +382,87 @@ async def phone_stream_ws(websocket: WebSocket) -> None:
             msg = await websocket.receive()
             if msg.get("type") == "websocket.disconnect":
                 break
-            jpeg_bytes: bytes | None = None
-            client_ts = time.time() * 1000.0
 
-            if "bytes" in msg and msg["bytes"]:
-                raw = msg["bytes"]
-                # Binary protocol: 8-byte big-endian float64 client_ts + raw JPEG payload
-                if len(raw) > 8:
-                    client_ts = struct.unpack(">d", raw[:8])[0]
-                    jpeg_bytes = raw[8:]
-            elif "text" in msg and msg["text"]:
-                parsed = json.loads(msg["text"])
-                if "frame_b64" in parsed:
-                    jpeg_bytes = base64.b64decode(parsed["frame_b64"].split(",")[-1])
-                    client_ts = float(parsed.get("client_ts", client_ts))
+            # Latest-frame-wins drain: discard queued older frames if network jittered
+            disconnected = False
+            while True:
+                try:
+                    newer = await asyncio.wait_for(websocket.receive(), timeout=0.0004)
+                    if newer.get("type") == "websocket.disconnect":
+                        disconnected = True
+                        break
+                    if ("bytes" in newer and newer["bytes"]) or ("text" in newer and newer["text"]):
+                        msg = newer
+                except asyncio.TimeoutError:
+                    break
+            if disconnected:
+                break
 
+            jpeg_bytes, client_ts, pitch_deg = _parse_phone_ws_message(msg)
             if not jpeg_bytes:
                 continue
 
-            guidance, depth_jpeg = await asyncio.to_thread(
-                _process_frame_sync, jpeg_bytes, client_ts
+            guidance, closeness = await asyncio.to_thread(
+                _process_frame_critical_path, detector, jpeg_bytes, client_ts, pitch_deg
             )
 
-            # Immediately send lightweight guidance JSON back to the phone for haptics
+            # 1. Immediately reply to phone BEFORE any dashboard image work!
             await websocket.send_text(guidance.model_dump_json())
 
-            # Fan out rich telemetry + visual overlays to connected projector dashboards
-            if state.dashboard_clients:
-                await broadcast_dashboard(
-                    {
-                        "type": "telemetry",
-                        "guidance": guidance.model_dump(),
-                        "raw_b64": base64.b64encode(jpeg_bytes).decode("ascii"),
-                        "depth_b64": base64.b64encode(depth_jpeg).decode("ascii"),
-                        "phone_connected": True,
-                    }
+            # 2. Throttled, memory-bounded fan-out to projector dashboards (at most 1 frame in flight!)
+            now_mono = time.perf_counter()
+            if (
+                state.dashboard_clients
+                and not state.dashboard_push_in_flight
+                and (now_mono - state.last_dashboard_push_at >= 0.080)
+            ):
+                state.last_dashboard_push_at = now_mono
+                state.dashboard_push_in_flight = True
+                depth_jpeg = await asyncio.to_thread(
+                    render_depth_overlay_jpeg, closeness, guidance
                 )
+
+                async def _push_dash(raw_jpg: bytes, d_jpg: bytes, g_dict: dict[str, Any]) -> None:
+                    try:
+                        await broadcast_dashboard(
+                            {
+                                "type": "telemetry",
+                                "guidance": g_dict,
+                                "raw_b64": base64.b64encode(raw_jpg).decode("ascii"),
+                                "depth_b64": base64.b64encode(d_jpg).decode("ascii"),
+                                "phone_connected": True,
+                            }
+                        )
+                    finally:
+                        state.dashboard_push_in_flight = False
+
+                asyncio.create_task(_push_dash(jpeg_bytes, depth_jpeg, guidance.model_dump()))
     except WebSocketDisconnect:
         pass
     finally:
-        state.phone_connected = False
-        await broadcast_dashboard({"type": "status", "phone_connected": False})
+        with state._lock:
+            state.active_phone_detectors.pop(conn_id, None)
+            still_connected = len(state.active_phone_detectors) > 0
+        await broadcast_dashboard({"type": "status", "phone_connected": still_connected})
 
 
 @app.websocket("/ws/dashboard")
 async def dashboard_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     state.dashboard_clients.add(websocket)
+    with state._lock:
+        last_g = state.last_guidance.model_dump() if state.last_guidance else None
     await websocket.send_text(
         json.dumps(
             {
                 "type": "status",
                 "phone_connected": state.phone_connected,
-                "guidance": (
-                    state.last_guidance.model_dump() if state.last_guidance else None
-                ),
+                "guidance": last_g,
             }
         )
     )
     try:
         while True:
-            # Keep socket alive and ignore ping frames from clients
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
