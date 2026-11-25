@@ -77,13 +77,41 @@ export function BirdEyeRadar({ guidance, memory }: BirdEyeRadarProps) {
 
     return (
       <div className="flex flex-col items-center justify-between rounded-xl border border-slate-800 bg-slate-900/85 p-3">
-        <div className="mb-1 flex w-full items-center justify-between text-[11px] font-semibold text-slate-300">
+        <div className="mb-1.5 flex w-full items-center justify-between text-[11px] font-semibold text-slate-300">
           <span className="text-sky-300">
-            360° Memory Map ({memory.scannedPercent}% scanned)
+            3D Space Memory ({memory.scannedPercent}% · {memory.filteredFlickers} flickers blocked)
           </span>
           <span className="font-mono text-slate-400">
-            {memory.stepCount} steps · {memory.walkedMeters.toFixed(1)}m
+            {memory.stepCount} stp · {memory.pitchDeg}°
           </span>
+        </div>
+
+        {/* 3 Vertical Elevation Memory Pills: UP (Head) / MID (Ahead) / DOWN (Floor & Curbs) */}
+        <div className="mb-1.5 grid w-full grid-cols-3 gap-1 text-center text-[10px] font-bold">
+          {(
+            [
+              { id: 'up', label: 'UP · Head', ok: memory.upClear, seen: memory.upSeen },
+              { id: 'mid', label: 'MID · Body', ok: memory.midClear, seen: memory.midSeen },
+              { id: 'down', label: 'DOWN · Floor', ok: memory.downClear, seen: memory.downSeen },
+            ] as const
+          ).map((b) => {
+            const activeCam = memory.cameraBand === b.id;
+            const cls = !b.ok
+              ? 'border-red-500/70 bg-red-950/70 text-red-200'
+              : b.seen
+                ? 'border-emerald-500/50 bg-emerald-950/50 text-emerald-200'
+                : 'border-slate-700 bg-slate-800/70 text-slate-400';
+            return (
+              <div
+                key={b.id}
+                className={`rounded-md border px-1.5 py-1 ${cls} ${
+                  activeCam ? 'ring-1 ring-sky-400' : ''
+                }`}
+              >
+                {b.label}: {!b.ok ? 'HAZARD' : b.seen ? 'MEM OK' : 'UNSEEN'}
+              </div>
+            );
+          })}
         </div>
 
         <svg role="img" viewBox="0 0 260 244" className="w-full max-w-[270px]">

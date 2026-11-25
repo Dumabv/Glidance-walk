@@ -51,13 +51,16 @@ def _load_rust_preproc():
         repo_root / "rust_core" / "target" / "release" / "libglidance_core.dylib",
         repo_root / "rust_core" / "target" / "release" / "libglidance_core.so",
     ]
+    existing = [p for p in candidates if p.exists()]
     if sys.platform == "darwin":
-        candidates.sort(key=lambda p: 0 if p.suffix == ".dylib" else 1)
+        existing.sort(key=lambda p: (0 if p.suffix == ".dylib" else 1, -p.stat().st_mtime))
     elif sys.platform.startswith("win"):
-        candidates.sort(key=lambda p: 0 if p.suffix == ".dll" else 1)
+        existing.sort(key=lambda p: (0 if p.suffix == ".dll" else 1, -p.stat().st_mtime))
+    else:
+        existing.sort(key=lambda p: -p.stat().st_mtime)
 
-    for path in candidates:
-        if path.exists():
+    for path in existing:
+        if True:
             try:
                 lib = ctypes.CDLL(str(path))
                 rgb_fn = lib.glidance_rgb_to_chw_norm

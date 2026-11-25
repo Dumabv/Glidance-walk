@@ -318,7 +318,7 @@ export function MobileWalker() {
     const onOrientation = (e: DeviceOrientationEvent) => {
       const compass = (e as DeviceOrientationEvent & { webkitCompassHeading?: number })
         .webkitCompassHeading;
-      memoryRef.current?.updateOrientation(e.alpha, compass ?? null);
+      memoryRef.current?.updateOrientation(e.alpha, compass ?? null, e.beta);
 
       if (e.beta === null || e.gamma === null) return;
       pitchDegRef.current = 0.8 * pitchDegRef.current + 0.2 * e.beta;
@@ -326,10 +326,10 @@ export function MobileWalker() {
 
       if (!sessionActiveRef.current) return;
       const p = pitchDegRef.current;
-      if (p > 5 && p < 34) {
-        setTiltWarning('Camera aimed too far down at shoes — tilt phone slightly up.');
-      } else if (p > 108 && p < 165) {
-        setTiltWarning('Camera aimed too high at ceiling — level phone forward.');
+      if (p > 5 && p < 24) {
+        setTiltWarning('Camera aimed straight down at shoes — tilt slightly forward.');
+      } else if (p > 115 && p < 165) {
+        setTiltWarning('Camera aimed at ceiling — level phone slightly down.');
       } else {
         setTiltWarning(null);
       }
@@ -338,12 +338,15 @@ export function MobileWalker() {
     const onMotion = (e: DeviceMotionEvent) => {
       if (!sessionActiveRef.current) return;
       const acc = e.accelerationIncludingGravity;
+      const rot = e.rotationRate;
       const dtSec = e.interval ? e.interval / 1000 : 0.016;
       memoryRef.current?.updateMotion(
         acc?.x,
         acc?.y,
         acc?.z,
-        e.rotationRate?.alpha ?? null,
+        rot?.alpha ?? null,
+        rot?.beta ?? null,
+        rot?.gamma ?? null,
         dtSec
       );
     };

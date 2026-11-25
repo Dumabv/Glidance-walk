@@ -62,18 +62,31 @@ export interface GuidancePayload {
   best_escape_deg?: number | null;
 }
 
+export type ElevationBand = 'down' | 'mid' | 'up';
+
 export interface MemoryCellPoint {
   gx: number;
   gy: number;
   prob: number;
   isCurb: boolean;
+  band: ElevationBand;
 }
 
 export interface SpatialMemorySnapshot {
   headingDeg: number;
+  pitchDeg: number;
+  cameraBand: ElevationBand;
   stepCount: number;
   walkedMeters: number;
   scannedPercent: number;
+  upClear: boolean;
+  midClear: boolean;
+  downClear: boolean;
+  upSeen: boolean;
+  midSeen: boolean;
+  downSeen: boolean;
+  filteredFlickers: number;
+  motionGated: boolean;
   blindLeftDanger: boolean;
   blindRightDanger: boolean;
   bestEscapeDeg: number | null;

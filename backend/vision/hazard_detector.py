@@ -129,13 +129,16 @@ def _load_rust_kernel():
         repo_root / "rust_core" / "target" / "release" / "libglidance_core.dylib",
         repo_root / "rust_core" / "target" / "release" / "libglidance_core.so",
     ]
+    existing = [p for p in candidates if p.exists()]
     if sys.platform == "darwin":
-        candidates.sort(key=lambda p: 0 if p.suffix == ".dylib" else 1)
+        existing.sort(key=lambda p: (0 if p.suffix == ".dylib" else 1, -p.stat().st_mtime))
     elif sys.platform.startswith("win"):
-        candidates.sort(key=lambda p: 0 if p.suffix == ".dll" else 1)
+        existing.sort(key=lambda p: (0 if p.suffix == ".dll" else 1, -p.stat().st_mtime))
+    else:
+        existing.sort(key=lambda p: -p.stat().st_mtime)
 
-    for path in candidates:
-        if path.exists():
+    for path in existing:
+        if True:
             try:
                 lib = ctypes.CDLL(str(path))
                 fn = lib.glidance_analyze_frame
@@ -413,8 +416,14 @@ class GroundAwareHazardDetector:
         closeness = np.nan_to_num(closeness, nan=0.0, posinf=1.0, neginf=0.0)
         h, w = closeness.shape
         c_cfg = self._c_cfg
+        has_live_imu = bool(np.isfinite(pitch_deg) and abs(pitch_deg) > 1.0)
         y_start = (h * 20) // 100
-        y_end = min(h, max(y_start + 8, (h * 96) // 100))
+        y_end_pct = (
+            int(np.clip(74.0 + (pitch_deg - 38.0) * 0.92, 74.0, 96.0))
+            if (has_live_imu and 10.0 < pitch_deg < 62.0)
+            else 96
+        )
+        y_end = min(h, max(y_start + 8, (h * y_end_pct) // 100))
         roi = closeness[y_start:y_end, :]
         roi_h = roi.shape[0]
 
@@ -437,26 +446,31 @@ class GroundAwareHazardDetector:
         obs_intercept = q_bot - obs_slope * t_bot
 
         imu_shift = (
-            float(np.clip((72.0 - pitch_deg) * 0.004, -0.08, 0.12))
-            if np.isfinite(pitch_deg) and 15.0 < pitch_deg < 135.0
+            float(np.clip((74.0 - pitch_deg) * 0.006, -0.08, 0.24))
+            if has_live_imu and 12.0 < pitch_deg < 135.0
             else 0.0
         )
         max_intercept = (
-            0.38
+            max(0.38, 0.20 + max(0.0, imu_shift))
             if (obs_slope >= 0.40 and q_bot <= 0.98 and float(row_q20[0]) <= 0.48)
             else (0.20 + max(0.0, imu_shift))
         )
-        floor_slope = float(np.clip(obs_slope, 0.44, 0.88))
+        min_slope = 0.32 if (has_live_imu and 12.0 < pitch_deg < 55.0) else 0.44
+        floor_slope = float(np.clip(obs_slope, min_slope, 0.88))
         floor_intercept = float(np.clip(obs_intercept, 0.04, max_intercept))
 
         y_norm = np.linspace(0.0, 1.0, roi_h, dtype=np.float32)
         prior = floor_intercept + floor_slope * y_norm
         expected_floor = np.minimum(np.maximum(prior, row_q20 * 0.86), prior + 0.06)
 
-        oh_patch = closeness[(h * 4) // 100 : y_start, (w * 24) // 100 : (w * 76) // 100]
-        oh_p90 = float(np.percentile(oh_patch, 90.0)) if oh_patch.size > 0 else 0.0
-        oh_cov = float(np.mean(oh_patch > 0.80)) if oh_patch.size > 0 else 0.0
-        overhead_hazard = raw_spread_milli > WALL_SPREAD_EPS and oh_p90 >= 0.84 and oh_cov >= 0.18
+        allow_overhang = (not has_live_imu) or (74.0 <= pitch_deg <= 112.0)
+        if allow_overhang:
+            oh_patch = closeness[(h * 4) // 100 : y_start, (w * 24) // 100 : (w * 76) // 100]
+            oh_p90 = float(np.percentile(oh_patch, 90.0)) if oh_patch.size > 0 else 0.0
+            oh_cov = float(np.mean(oh_patch > 0.80)) if oh_patch.size > 0 else 0.0
+        else:
+            oh_p90, oh_cov = 0.0, 0.0
+        overhead_hazard = allow_overhang and raw_spread_milli > WALL_SPREAD_EPS and oh_p90 >= 0.84 and oh_cov >= 0.18
 
         margin = c_cfg.floor_margin_milli / 1000.0
         toe_start = min(roi_h - 2, (roi_h * 74) // 100)

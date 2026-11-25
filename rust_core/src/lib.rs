@@ -562,8 +562,17 @@ fn analyze_frame_with_qbuf(
     let ema_alpha_atk = if ema_alpha_rel >= 780 { ema_alpha_rel } else { 780 };
     let confirm_frames = cfg.confirm_frames.clamp(1, 5);
 
+    let has_live_imu = pitch_deg.is_finite() && pitch_deg.abs() > 1.0;
+
+    // Pitch-aware shoe/foot mask: when holding phone in hand looking at screen (`pitch_deg` 20°..60°),
+    // bottom 15-22% of camera points at -58°..-68° (walker's own shoes/legs!). Crop `y_end` dynamically!
     let y_start = (h * 20) / 100;
-    let y_end = ((h * 96) / 100).max(y_start + 8).min(h);
+    let y_end_pct = if has_live_imu && pitch_deg > 10.0 && pitch_deg < 62.0 {
+        clamp_f32(74.0 + (pitch_deg - 38.0) * 0.92, 74.0, 96.0) as usize
+    } else {
+        96usize
+    };
+    let y_end = ((h * y_end_pct) / 100).max(y_start + 8).min(h);
     let roi_h = y_end - y_start;
 
     // 2. Strided row-wise 20th-percentile lower envelope (pure u8 reads)
@@ -607,18 +616,23 @@ fn analyze_frame_with_qbuf(
     let obs_slope = small_slice_median(&mut slopes3);
     let obs_intercept = q_bot - obs_slope * t_bot;
 
-    let imu_shift = if pitch_deg.is_finite() && pitch_deg > 15.0 && pitch_deg < 135.0 {
-        clamp_f32((72.0 - pitch_deg) * 0.004, -0.08, 0.12)
+    let imu_shift = if has_live_imu && pitch_deg > 12.0 && pitch_deg < 135.0 {
+        clamp_f32((74.0 - pitch_deg) * 0.006, -0.08, 0.24)
     } else {
         0.0
     };
 
     let max_intercept = if obs_slope >= 0.40 && q_bot <= 0.98 && row_q20[0] <= 0.48 {
-        0.38
+        0.38f32.max(0.20 + imu_shift.max(0.0))
     } else {
         0.20 + imu_shift.max(0.0)
     };
-    let floor_slope = clamp_f32(obs_slope, 0.44, 0.88);
+    let min_slope = if has_live_imu && pitch_deg > 12.0 && pitch_deg < 55.0 {
+        0.32
+    } else {
+        0.44
+    };
+    let floor_slope = clamp_f32(obs_slope, min_slope, 0.88);
     let floor_intercept = clamp_f32(obs_intercept, 0.04, max_intercept);
 
     let mut expected_floor_milli = [0u32; MAX_DIM];
@@ -632,27 +646,33 @@ fn analyze_frame_with_qbuf(
     out.floor_slope = floor_slope;
     out.floor_intercept = floor_intercept;
 
-    // 4. Head-Level Overhang Guard (pure u8 loop, `0.80 * 255 = 204`)
-    let oh_y0 = (h * 4) / 100;
-    let oh_y1 = y_start.max(oh_y0 + 2);
-    let oh_x0 = (w * 24) / 100;
-    let oh_x1 = (w * 76) / 100;
-    let mut oh_hist = [0u32; 256];
-    let mut oh_total = 0u32;
-    let mut oh_high = 0u32;
-    for y in oh_y0..oh_y1 {
-        let row_slice = &q_img[y * w + oh_x0..y * w + oh_x1];
-        for &q in row_slice {
-            oh_hist[q as usize] += 1;
-            if q > 204 {
-                oh_high += 1;
+    // 4. Head-Level Overhang Guard: ONLY valid when phone is upright (`pitch_deg >= 74°`) or no IMU (`0.0`).
+    //    When tilted down in hand (`pitch < 74°`), top of frame sees floor/chairs ahead, NOT head level!
+    let mut oh_p90 = 0.0f32;
+    let mut oh_cov = 0.0f32;
+    let allow_overhang = !has_live_imu || (pitch_deg >= 74.0 && pitch_deg <= 112.0);
+    if allow_overhang {
+        let oh_y0 = (h * 4) / 100;
+        let oh_y1 = y_start.max(oh_y0 + 2);
+        let oh_x0 = (w * 24) / 100;
+        let oh_x1 = (w * 76) / 100;
+        let mut oh_hist = [0u32; 256];
+        let mut oh_total = 0u32;
+        let mut oh_high = 0u32;
+        for y in oh_y0..oh_y1 {
+            let row_slice = &q_img[y * w + oh_x0..y * w + oh_x1];
+            for &q in row_slice {
+                oh_hist[q as usize] += 1;
+                if q > 204 {
+                    oh_high += 1;
+                }
             }
+            oh_total += row_slice.len() as u32;
         }
-        oh_total += row_slice.len() as u32;
+        oh_p90 = quantile_from_hist_u32(&oh_hist, oh_total, 900);
+        oh_cov = if oh_total > 0 { oh_high as f32 / oh_total as f32 } else { 0.0 };
     }
-    let oh_p90 = quantile_from_hist_u32(&oh_hist, oh_total, 900);
-    let oh_cov = if oh_total > 0 { oh_high as f32 / oh_total as f32 } else { 0.0 };
-    let overhead_hazard = raw_spread_milli > WALL_SPREAD_EPS && oh_p90 >= 0.84 && oh_cov >= 0.18;
+    let overhead_hazard = allow_overhang && raw_spread_milli > WALL_SPREAD_EPS && oh_p90 >= 0.84 && oh_cov >= 0.18;
     if overhead_hazard {
         out.flags |= 0x02;
     }
@@ -855,21 +875,34 @@ fn analyze_frame_with_qbuf(
         };
     }
 
-    // 6. Pure-Integer u16 Ring-Buffer Curb Detector with Exact Quantile-Shift Identity!
-    let curb_out = detect_curb_verified_u8(
-        q_img,
-        h,
-        w,
-        y_start,
-        &expected_floor_milli,
-        roi_h,
-        curb_thresh,
-        ema_alpha_atk,
-        ema_alpha_rel,
-        confirm_frames,
-        stateful,
-        state,
-    );
+    // 6. Pure-Integer u16 Ring-Buffer Curb Detector (gated off when camera points at ceiling `pitch > 96°`)
+    let allow_curb = !has_live_imu || (pitch_deg >= 26.0 && pitch_deg <= 96.0);
+    let curb_out = if allow_curb {
+        detect_curb_verified_u8(
+            q_img,
+            h,
+            w,
+            y_start,
+            &expected_floor_milli,
+            roi_h,
+            curb_thresh,
+            ema_alpha_atk,
+            ema_alpha_rel,
+            confirm_frames,
+            stateful,
+            state,
+        )
+    } else {
+        state.curb_streak = 0;
+        CCurbOut {
+            detected: 0,
+            stairs_likely: 0,
+            _pad: [0; 2],
+            confidence: 0.0,
+            drop_row_ratio: 0.72,
+            gradient_peak: 0.0,
+        }
+    };
 
     // 7. Lean Theorems 1–4: Verified Steering & Dominance Lattice
     let (overall, steering) = decide_guidance(
@@ -1247,9 +1280,10 @@ pub fn normalize_raw_depth_inplace(
     };
 
     let mut p2 = find_q(20);
-    let mut p98 = find_q(980);
+    let p98 = find_q(980);
     let spread = (p98 - p2).max(0.0);
     let spread_milli: u32;
+    let eff_span: f32;
 
     if !*ema_initialized {
         *ema_p2 = p2;
@@ -1257,20 +1291,31 @@ pub fn normalize_raw_depth_inplace(
         *ema_spread = spread.max(1e-4);
         *ema_initialized = true;
         spread_milli = 600;
+        eff_span = spread.max(1e-5);
     } else {
+        // Asymmetric room-scale anchor: expands quickly on deep hallway views, decays VERY slowly
+        // when looking down at flat floor so floor grain/shadows NEVER get amplified 3.5x!
+        if spread > *ema_spread {
+            *ema_spread = 0.65 * (*ema_spread) + 0.35 * spread;
+        } else {
+            *ema_spread = 0.985 * (*ema_spread) + 0.015 * spread;
+        }
         let ratio = spread / (*ema_spread).max(1e-4);
         spread_milli = clamp_f32(ratio * 550.0, 0.0, 1000.0) as u32;
         if spread_milli > 120 {
-            *ema_p2 = 0.85 * (*ema_p2) + 0.15 * p2;
-            *ema_p98 = 0.85 * (*ema_p98) + 0.15 * p98;
-            *ema_spread = (*ema_p98 - *ema_p2).max(1e-4);
+            *ema_p2 = 0.80 * (*ema_p2) + 0.20 * p2;
+            *ema_p98 = 0.80 * (*ema_p98) + 0.20 * p98;
+            p2 = *ema_p2;
         } else {
             p2 = *ema_p2;
-            p98 = *ema_p98;
         }
+        eff_span = (*ema_p98 - *ema_p2)
+            .max(0.60 * (*ema_spread))
+            .max(spread)
+            .max(1e-5);
     }
 
-    let inv_denom = 1.0 / (p98 - p2).max(1e-5);
+    let inv_denom = 1.0 / eff_span;
     for v in buf.iter_mut() {
         *v = clamp_f32((*v - p2) * inv_denom, 0.0, 1.0);
     }
