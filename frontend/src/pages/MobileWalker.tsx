@@ -9,12 +9,21 @@ import {
   Radio,
   Save,
   Smartphone,
+  SwitchCamera,
   Unlock,
   Vibrate,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import { BirdEyeRadar } from '../components/BirdEyeRadar';
+import {
+  acquireCameraStream,
+  getCameraLabel,
+  getOppositeFacingMode,
+  stopMediaStream,
+  switchCameraStream,
+  type CameraFacingMode,
+} from '../services/camera';
 import { HapticsEngine, type HapticPulseEvent } from '../services/haptics';
 import {
   SpatialAudioEngine,
@@ -94,6 +103,8 @@ export function MobileWalker() {
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   const sessionActiveRef = useRef(false);
+  const sessionIdRef = useRef(0);
+  const switchingCameraRef = useRef(false);
   const inFlightRef = useRef(false);
   const encodingRef = useRef(false);
   const lastSendAtRef = useRef(0);
@@ -106,6 +117,9 @@ export function MobileWalker() {
 
   const [execMode, setExecMode] = useState<ExecutionMode>('auto');
   const [streaming, setStreaming] = useState(false);
+  const [facingMode, setFacingMode] = useState<CameraFacingMode>('environment');
+  const [cameraDeviceLabel, setCameraDeviceLabel] = useState<string | null>(null);
+  const [switchingCamera, setSwitchingCamera] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const [workerStatus, setWorkerStatus] = useState<string>('idle');
   const [signalLost, setSignalLost] = useState(false);
@@ -131,6 +145,7 @@ export function MobileWalker() {
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const [liveAnnouncement, setLiveAnnouncement] = useState('');
+  const [statusAnnouncement, setStatusAnnouncement] = useState('');
 
   const frameTimestampsRef = useRef<number[]>([]);
   const smoothedRttRef = useRef<number>(250);
@@ -311,19 +326,58 @@ export function MobileWalker() {
     }
   }, []);
 
-  const stopSession = useCallback(() => {
-    sessionActiveRef.current = false;
-    if (rvfcHandleRef.current !== null) {
-      const v = videoRef.current as (HTMLVideoElement & {
-        cancelVideoFrameCallback?: (h: number) => void;
-      }) | null;
-      if (v && typeof v.cancelVideoFrameCallback === 'function') {
-        v.cancelVideoFrameCallback(rvfcHandleRef.current);
-      } else {
-        window.cancelAnimationFrame(rvfcHandleRef.current);
-      }
-      rvfcHandleRef.current = null;
+  const cancelFrameLoop = useCallback(() => {
+    if (rvfcHandleRef.current === null) return;
+    const v = videoRef.current as (HTMLVideoElement & {
+      cancelVideoFrameCallback?: (h: number) => void;
+    }) | null;
+    if (v && typeof v.cancelVideoFrameCallback === 'function') {
+      v.cancelVideoFrameCallback(rvfcHandleRef.current);
+    } else {
+      window.cancelAnimationFrame(rvfcHandleRef.current);
     }
+    rvfcHandleRef.current = null;
+  }, []);
+
+  const startFrameLoop = useCallback(() => {
+    cancelFrameLoop();
+    // Beat-free camera-synced frame pacing (`requestVideoFrameCallback` up to 30 FPS):
+    // Eliminates the 0-69ms idle beat-aliasing lag of `setInterval(..., 70)`!
+    const vExt = videoRef.current as (HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+    }) | null;
+    const stepLoop = () => {
+      if (!sessionActiveRef.current) return;
+      if (performance.now() - lastSendAtRef.current >= 33) {
+        dispatchFrameRef.current();
+      }
+      if (vExt && typeof vExt.requestVideoFrameCallback === 'function') {
+        rvfcHandleRef.current = vExt.requestVideoFrameCallback(stepLoop);
+      } else {
+        rvfcHandleRef.current = window.requestAnimationFrame(stepLoop);
+      }
+    };
+    stepLoop();
+  }, [cancelFrameLoop]);
+
+  const attachStreamToVideo = useCallback(async (stream: MediaStream) => {
+    streamRef.current = stream;
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      try {
+        await videoRef.current.play();
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          throw err;
+        }
+      }
+    }
+  }, []);
+
+  const stopSession = useCallback(() => {
+    sessionIdRef.current += 1;
+    sessionActiveRef.current = false;
+    cancelFrameLoop();
     if (watchdogRef.current !== null) {
       window.clearInterval(watchdogRef.current);
       watchdogRef.current = null;
@@ -337,9 +391,10 @@ export function MobileWalker() {
       wsRef.current.close();
       wsRef.current = null;
     }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
+    stopMediaStream(streamRef.current);
+    streamRef.current = null;
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
     if (wakeLockRef.current) {
       void wakeLockRef.current.release().catch(() => {});
@@ -347,12 +402,15 @@ export function MobileWalker() {
     }
     inFlightRef.current = false;
     encodingRef.current = false;
+    switchingCameraRef.current = false;
+    setSwitchingCamera(false);
+    setCameraDeviceLabel(null);
     setStreaming(false);
     setWsConnected(false);
     setSignalLost(false);
     setGuidance(null);
     setMemorySnap(null);
-  }, []);
+  }, [cancelFrameLoop]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -421,7 +479,7 @@ export function MobileWalker() {
   }, []);
 
   const dispatchFrame = useCallback(() => {
-    if (!sessionActiveRef.current) return;
+    if (!sessionActiveRef.current || switchingCameraRef.current) return;
     const video = videoRef.current;
     if (!video || video.readyState < 2) return;
 
@@ -596,21 +654,23 @@ export function MobileWalker() {
       void devMotion.requestPermission().catch(() => {});
     }
 
+    const activeSessionId = ++sessionIdRef.current;
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 24, max: 30 },
-        },
-        audio: false,
-      });
-      streamRef.current = stream;
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        videoRef.current.srcObject = null;
       }
+      stopMediaStream(streamRef.current);
+      streamRef.current = null;
+      const { stream, actualFacingMode, deviceLabel, usedFallback } =
+        await acquireCameraStream(facingMode);
+      if (sessionIdRef.current !== activeSessionId) {
+        stopMediaStream(stream);
+        return;
+      }
+      setFacingMode(actualFacingMode);
+      setCameraDeviceLabel(usedFallback ? deviceLabel : null);
+      await attachStreamToVideo(stream);
     } catch (err) {
       setErrorMsg(
         `Camera access failed (${err instanceof Error ? err.message : 'permission denied'}). Open over HTTPS or localhost.`
@@ -638,27 +698,11 @@ export function MobileWalker() {
       }
     }
 
-    // Beat-free camera-synced frame pacing (`requestVideoFrameCallback` up to 30 FPS):
-    // Eliminates the 0-69ms idle beat-aliasing lag of `setInterval(..., 70)`!
-    const vExt = videoRef.current as (HTMLVideoElement & {
-      requestVideoFrameCallback?: (cb: () => void) => number;
-    }) | null;
-    const stepLoop = () => {
-      if (!sessionActiveRef.current) return;
-      if (performance.now() - lastSendAtRef.current >= 33) {
-        dispatchFrame();
-      }
-      if (vExt && typeof vExt.requestVideoFrameCallback === 'function') {
-        rvfcHandleRef.current = vExt.requestVideoFrameCallback(stepLoop);
-      } else {
-        rvfcHandleRef.current = window.requestAnimationFrame(stepLoop);
-      }
-    };
-    stepLoop();
+    startFrameLoop();
 
     // Adaptive RTT-Aware Watchdog: avoids false alarms on 4G / Cloudflare tunnels while catching real stalls!
     watchdogRef.current = window.setInterval(() => {
-      if (!sessionActiveRef.current) return;
+      if (!sessionActiveRef.current || switchingCameraRef.current) return;
       const track = streamRef.current?.getVideoTracks()[0];
       const trackDead = !track || track.readyState === 'ended';
       const graceMs =
@@ -675,6 +719,68 @@ export function MobileWalker() {
         );
       }
     }, 350);
+  };
+
+  const handleSwitchCamera = async () => {
+    if (eyesFreeLock || switchingCameraRef.current) return;
+    hapticsRef.current?.triggerTapFeedback();
+    const targetMode = getOppositeFacingMode(facingMode);
+
+    // Before streaming starts, simply toggle the preferred default camera.
+    if (!streaming && !streamRef.current) {
+      setFacingMode(targetMode);
+      setStatusAnnouncement(
+        `Selected ${getCameraLabel(targetMode).toLowerCase()} camera.`
+      );
+      return;
+    }
+
+    const activeSessionId = sessionIdRef.current;
+    switchingCameraRef.current = true;
+    setSwitchingCamera(true);
+    setErrorMsg(null);
+    cancelFrameLoop();
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    try {
+      const { stream, actualFacingMode, deviceLabel, usedFallback, switchedDevice } =
+        await switchCameraStream(streamRef.current, targetMode);
+
+      if (sessionIdRef.current !== activeSessionId) {
+        stopMediaStream(stream);
+        return;
+      }
+
+      await attachStreamToVideo(stream);
+      setFacingMode(actualFacingMode);
+      setCameraDeviceLabel(usedFallback ? deviceLabel : null);
+      inFlightRef.current = false;
+      encodingRef.current = false;
+      lastValidFrameAtRef.current = performance.now();
+      setSignalLost(false);
+      startFrameLoop();
+
+      if (!switchedDevice) {
+        setStatusAnnouncement('Only one camera is available on this device.');
+      } else if (usedFallback && deviceLabel) {
+        setStatusAnnouncement(`Switched camera to ${deviceLabel}.`);
+      } else {
+        setStatusAnnouncement(
+          `Switched to ${getCameraLabel(actualFacingMode).toLowerCase()} camera.`
+        );
+      }
+    } catch (err) {
+      setErrorMsg(
+        `Unable to switch camera (${err instanceof Error ? err.message : 'hardware busy'}). Tap Start Walking Stream to reconnect.`
+      );
+      stopSession();
+    } finally {
+      switchingCameraRef.current = false;
+      setSwitchingCamera(false);
+    }
   };
 
   const quickCapture = async (label: SampleLabel) => {
@@ -722,6 +828,8 @@ export function MobileWalker() {
         : 'READY';
   const meta = STEERING_META[bannerStateKey];
   const nativeVib = hapticsRef.current.isNativeVibrationSupported();
+  const cameraLabel = getCameraLabel(facingMode);
+  const nextCameraLabel = getCameraLabel(getOppositeFacingMode(facingMode));
 
   return (
     <div className="mx-auto flex max-w-xl flex-col gap-3.5 px-3 pb-24 pt-3">
@@ -759,6 +867,9 @@ export function MobileWalker() {
         className="visually-hidden"
       >
         {liveAnnouncement}
+      </div>
+      <div aria-live="polite" aria-atomic="true" className="visually-hidden">
+        {statusAnnouncement}
       </div>
 
       {/* Off-screen iOS 17.4+ switch Taptic bridge for physical button taps */}
@@ -876,13 +987,13 @@ export function MobileWalker() {
         )}
       </button>
 
-      {/* Primary Action Button + Palm-Safe Eyes-Free Lock */}
-      <div className="flex gap-2">
+      {/* Primary Action Button + Camera Switch + Palm-Safe Eyes-Free Lock */}
+      <div className="flex flex-wrap gap-2">
         <button
           type="button"
           disabled={eyesFreeLock && streaming}
           onClick={streaming ? stopSession : () => void startSession()}
-          className={`flex flex-1 items-center justify-center gap-2 rounded-2xl px-5 py-4 text-base font-bold shadow-lg transition ${
+          className={`flex min-w-[11rem] flex-1 items-center justify-center gap-2 rounded-2xl px-5 py-4 text-base font-bold shadow-lg transition ${
             streaming
               ? 'bg-red-600 text-white hover:bg-red-500 disabled:opacity-45'
               : 'bg-sky-500 text-slate-950 hover:bg-sky-400'
@@ -899,6 +1010,22 @@ export function MobileWalker() {
               Start Walking Stream
             </>
           )}
+        </button>
+
+        <button
+          type="button"
+          aria-disabled={eyesFreeLock || switchingCamera || undefined}
+          aria-busy={switchingCamera || undefined}
+          aria-label={`Camera: ${cameraLabel}, switch to ${nextCameraLabel.toLowerCase()}`}
+          onClick={() => void handleSwitchCamera()}
+          className={`flex items-center justify-center gap-1.5 rounded-2xl border px-3.5 py-4 text-xs font-bold transition ${
+            eyesFreeLock || switchingCamera
+              ? 'border-slate-700 bg-slate-900 text-slate-400 opacity-55'
+              : 'border-slate-700 bg-slate-800 text-slate-100 hover:border-sky-400 hover:bg-slate-700'
+          }`}
+        >
+          <SwitchCamera className="h-5 w-5" aria-hidden="true" />
+          <span>Camera: {cameraLabel}</span>
         </button>
 
         {streaming && (
@@ -1188,6 +1315,7 @@ export function MobileWalker() {
         <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
           <video
             ref={videoRef}
+            autoPlay
             playsInline
             muted
             className={`w-full bg-black object-contain ${
@@ -1195,7 +1323,10 @@ export function MobileWalker() {
             }`}
           />
           <canvas ref={canvasRef} className="hidden" />
-          <div className="flex items-center justify-between px-3 py-2 text-xs text-slate-400">
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
+            <span className="truncate">
+              Lens: {cameraDeviceLabel ?? cameraLabel}
+            </span>
             <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
             <span>RTT: {rttMs} ms</span>
           </div>
