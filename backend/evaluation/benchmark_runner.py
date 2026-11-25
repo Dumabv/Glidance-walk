@@ -19,16 +19,25 @@ from backend.vision.hazard_detector import GroundAwareHazardDetector, HazardResu
 
 
 def _is_smart_direction_correct(label: SampleLabel, res: HazardResult) -> bool:
+    """Strict directional & safety evaluation (verifies we never steer into an obstacle or confuse boxes with curbs)."""
     if label == "clear":
-        return res.overall_severity == "clear"
+        return res.overall_severity == "clear" and res.steering == "CLEAR"
     if label == "curb_drop":
-        return res.curb.detected
+        return res.curb.detected and res.steering == "CURB_DROP"
     if label == "obstacle_left":
-        return res.left.severity in ("caution", "danger")
+        return res.left.severity in ("caution", "danger") and res.steering not in (
+            "VEER_LEFT",
+            "CURB_DROP",
+        )
     if label == "obstacle_center":
-        return res.center.severity in ("caution", "danger") or res.steering == "STOP"
+        return (
+            res.center.severity in ("caution", "danger") or res.steering == "STOP"
+        ) and res.steering != "CURB_DROP"
     if label == "obstacle_right":
-        return res.right.severity in ("caution", "danger")
+        return res.right.severity in ("caution", "danger") and res.steering not in (
+            "VEER_RIGHT",
+            "CURB_DROP",
+        )
     return False
 
 
@@ -89,7 +98,7 @@ def run_benchmark(
     config: CalibrationConfig,
     include_synthetic: bool = True,
 ) -> BenchmarkReport:
-    """Benchmarks Naive Center Threshold vs Ground-Aware Detector on real + calibration scenes."""
+    """Benchmarks Naive Center Threshold vs Verified Glidance Rust/V-Disparity Engine."""
     naive_detector = NaiveCenterThresholdDetector()
     smart_detector = GroundAwareHazardDetector(config=config)
 
@@ -113,15 +122,21 @@ def run_benchmark(
         raw_bytes = dataset_store.get_image_bytes(rec.sample_id)
         if raw_bytes is None:
             continue
-        img, decode_ms = depth_engine.decode_jpeg(raw_bytes)
-        closeness, infer_ms = depth_engine.predict_pil(img)
+        dec = depth_engine.decode_frame(raw_bytes)
+        pred = depth_engine.predict_rgb(dec.rgb, dec.luma_mean, dec.luma_std)
 
-        n_res = naive_detector.analyze(closeness)
-        s_res = smart_detector.analyze(closeness, stateful=False)
+        n_res = naive_detector.analyze(pred.closeness)
+        s_res = smart_detector.analyze(
+            pred.closeness,
+            stateful=False,
+            raw_spread_milli=pred.raw_spread_milli,
+            luma_mean=pred.luma_mean,
+            luma_std=pred.luma_std,
+        )
 
         is_haz = rec.label != "clear"
-        n_total_ms = decode_ms + infer_ms + n_res.elapsed_ms
-        s_total_ms = decode_ms + infer_ms + s_res.hazard_ms
+        n_total_ms = dec.decode_ms + pred.inference_ms + n_res.elapsed_ms
+        s_total_ms = dec.decode_ms + pred.inference_ms + s_res.hazard_ms
 
         n_ok = (n_res.obstacle_detected == is_haz) and (rec.label != "curb_drop")
         s_detected = (s_res.overall_severity != "clear") or s_res.curb.detected
@@ -152,7 +167,7 @@ def run_benchmark(
                 smart_severity=s_res.overall_severity,
                 smart_curb=s_res.curb.detected,
                 smart_correct=s_ok,
-                smart_ms=round(s_total_ms, 2),
+                smart_ms=round(s_total_ms, 3),
             )
         )
 
@@ -161,7 +176,11 @@ def run_benchmark(
         for scene in build_synthetic_calibration_suite():
             synthetic_count += 1
             n_res = naive_detector.analyze(scene.closeness_map)
-            s_res = smart_detector.analyze(scene.closeness_map, stateful=False)
+            s_res = smart_detector.analyze(
+                scene.closeness_map,
+                stateful=False,
+                raw_spread_milli=scene.raw_spread_milli,
+            )
 
             is_haz = scene.label != "clear"
             n_ok = (n_res.obstacle_detected == is_haz) and (scene.label != "curb_drop")
@@ -193,7 +212,7 @@ def run_benchmark(
                     smart_severity=s_res.overall_severity,
                     smart_curb=s_res.curb.detected,
                     smart_correct=s_ok,
-                    smart_ms=round(s_res.hazard_ms, 2),
+                    smart_ms=round(s_res.hazard_ms, 3),
                 )
             )
 
@@ -207,7 +226,7 @@ def run_benchmark(
         naive_lat,
     )
     smart_metrics = _compute_metrics(
-        "Glidance Ground-Aware + Curb",
+        f"Glidance Verified ({smart_detector.kernel_backend})",
         truth_hazard,
         smart_pred,
         labels,

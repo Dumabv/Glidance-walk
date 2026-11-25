@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Severity = Literal["clear", "caution", "danger"]
 SteeringAction = Literal["CLEAR", "VEER_LEFT", "VEER_RIGHT", "STOP", "CURB_DROP"]
@@ -27,6 +27,7 @@ class CurbMetrics(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     drop_row_ratio: float = Field(ge=0.0, le=1.0)
     gradient_peak: float = Field(ge=0.0)
+    stairs_likely: bool = False
 
 
 class LatencyBreakdown(BaseModel):
@@ -50,6 +51,11 @@ class GuidancePayload(BaseModel):
     latency: LatencyBreakdown
     device: str
     model_name: str
+    kernel_backend: str = "rust-simd"
+    overhead_hazard: bool = False
+    wall_override: bool = False
+    lens_blocked: bool = False
+    pitch_deg: float | None = None
 
 
 class CalibrationConfig(BaseModel):
@@ -59,6 +65,12 @@ class CalibrationConfig(BaseModel):
     floor_margin: float = Field(default=0.13, ge=0.02, le=0.4)
     ema_alpha: float = Field(default=0.55, ge=0.1, le=1.0)
     confirm_frames: int = Field(default=2, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def ensure_threshold_ordering(self) -> CalibrationConfig:
+        if self.caution_threshold > self.danger_threshold - 0.04:
+            self.caution_threshold = round(max(0.05, self.danger_threshold - 0.04), 3)
+        return self
 
 
 class SampleRecord(BaseModel):

@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  color-scheme: dark;
   --target-size: 24px;
+  color-scheme: dark;
 }
 
 @media (pointer: coarse) {
@@ -12,23 +12,22 @@
 }
 
 html {
-  scroll-padding-bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
+  scroll-padding-top: calc(3.75rem + env(safe-area-inset-top, 0px));
+  scroll-padding-bottom: calc(2rem + env(safe-area-inset-bottom, 0px));
 }
 
 body {
   overflow-wrap: break-word;
-  background-color: #070b14;
-  color: #f1f5f9;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
-h1,
-h2,
-h3 {
+h1, h2, h3 {
   text-wrap: balance;
 }
 
-p,
-li {
+p, li {
   text-wrap: pretty;
 }
 
@@ -36,30 +35,22 @@ li {
   overflow-wrap: anywhere;
 }
 
-img,
-video {
+img, video {
   max-inline-size: 100%;
   block-size: auto;
 }
 
-:where(
-  button,
-  select,
-  textarea,
-  input:not([type="checkbox"], [type="radio"]),
-  [role="button"],
-  nav a,
-  label:has(input[type="checkbox"], input[type="radio"])
-) {
+:where(button, select, textarea, input:not([type="checkbox"], [type="radio"]), [role="button"], nav a) {
   min-block-size: var(--target-size);
   min-inline-size: var(--target-size);
 }
 
-:where(a:any-link, button, input, select, [tabindex]):focus-visible {
+:where(a:any-link, button, input, select, [tabindex="0"]):focus-visible {
   outline: 3px solid #38bdf8;
   outline-offset: 3px;
 }
 
+/* Accessible visually-hidden utility that reveals skip links on focus */
 .visually-hidden:where(:not(:focus-within, :active)) {
   position: absolute !important;
   clip-path: inset(50%) !important;
@@ -70,10 +61,4 @@ video {
   padding: 0 !important;
   border: 0 !important;
   white-space: nowrap !important;
-}
-
-.safe-bottom-bar {
-  padding-bottom: max(0.75rem, env(safe-area-inset-bottom, 0px));
-  padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
-  padding-right: max(0.75rem, env(safe-area-inset-right, 0px));
 }

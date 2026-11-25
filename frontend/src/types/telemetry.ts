@@ -14,6 +14,8 @@ export type SampleLabel =
   | 'obstacle_right'
   | 'curb_drop';
 
+export type ExecutionMode = 'auto' | 'tethered' | 'on_phone';
+
 export interface ZoneMetrics {
   severity: Severity;
   obstacle_score: number;
@@ -26,6 +28,7 @@ export interface CurbMetrics {
   confidence: number;
   drop_row_ratio: number;
   gradient_peak: number;
+  stairs_likely?: boolean;
 }
 
 export interface LatencyBreakdown {
@@ -49,6 +52,11 @@ export interface GuidancePayload {
   latency: LatencyBreakdown;
   device: string;
   model_name: string;
+  kernel_backend?: string;
+  overhead_hazard?: boolean;
+  wall_override?: boolean;
+  lens_blocked?: boolean;
+  pitch_deg?: number | null;
 }
 
 export interface CalibrationConfig {

@@ -110,18 +110,32 @@ export function MissionControl() {
     });
   };
 
-  const applyCalibration = async (next: CalibrationConfig) => {
-    setCalibration(next);
+  const calibTimerRef = useState<{ id: number | null }>({ id: null })[0];
+
+  const applyCalibration = (next: CalibrationConfig) => {
+    const safeNext: CalibrationConfig = {
+      ...next,
+      caution_threshold: Math.min(
+        next.caution_threshold,
+        Math.max(0.05, Number((next.danger_threshold - 0.04).toFixed(2)))
+      ),
+    };
+    setCalibration(safeNext);
     setSavingCalib(true);
-    try {
-      await fetch('/api/calibration', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(next),
-      });
-    } finally {
-      setSavingCalib(false);
+    if (calibTimerRef.id !== null) {
+      window.clearTimeout(calibTimerRef.id);
     }
+    calibTimerRef.id = window.setTimeout(async () => {
+      try {
+        await fetch('/api/calibration', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(safeNext),
+        });
+      } finally {
+        setSavingCalib(false);
+      }
+    }, 120);
   };
 
   const p50 =
@@ -154,7 +168,7 @@ export function MissionControl() {
         <div className="flex flex-wrap items-center gap-2.5 text-xs font-semibold">
           <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-sky-300">
             <Cpu className="h-3.5 w-3.5" aria-hidden="true" />
-            Accelerator: {(guidance?.device ?? 'MPS').toUpperCase()}
+            Engine: {(guidance?.device ?? 'AUTO').toUpperCase()} · {(guidance?.kernel_backend ?? 'RUST-SIMD').toUpperCase()}
           </span>
           <span
             className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 ${

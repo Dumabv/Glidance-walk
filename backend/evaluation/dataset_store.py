@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import json
+import os
+from pathlib import Path
+import threading
 import time
 import uuid
-from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -21,6 +23,7 @@ class SyntheticCalibrationScene:
     label: SampleLabel
     note: str
     closeness_map: np.ndarray
+    raw_spread_milli: int = 600
 
 
 def build_synthetic_calibration_suite(
@@ -37,22 +40,28 @@ def build_synthetic_calibration_suite(
 
     scenes: list[SyntheticCalibrationScene] = []
 
-    # 1. Clear tilted hallways (these often break naive proximity baselines)
-    for i, (bot, note) in enumerate(
+    # 1. Clear tilted hallways & ramps (these often break naive proximity baselines)
+    for i, (bot, top, note) in enumerate(
         [
-            (0.64, "Flat hallway floor (level camera)"),
-            (0.71, "Slightly downward-tilted hallway floor"),
-            (0.69, "Wide corridor floor with smooth lighting"),
-            (0.66, "Sidewalk straight ahead, no obstacles"),
+            (0.64, 0.07, "Flat hallway floor (level camera)"),
+            (0.71, 0.07, "Slightly downward-tilted hallway floor"),
+            (0.69, 0.07, "Wide corridor floor with smooth lighting"),
+            (0.66, 0.07, "Sidewalk straight ahead, no obstacles"),
+            (0.90, 0.18, "Steeply pitched walkway / wheelchair ramp"),
+            (0.68, 0.08, "Shiny hallway floor with ceiling light stripe"),
         ],
         start=1,
     ):
+        m = flat_floor(bottom_val=bot, top_val=top)
+        if i == 6:
+            # CE2C: Specular horizontal stripe on flat linoleum floor must NOT trigger false CURB_DROP
+            m[int(h * 0.54) : int(h * 0.64), :] = 0.14
         scenes.append(
             SyntheticCalibrationScene(
                 sample_id=f"syn-clear-{i}",
                 label="clear",
                 note=note,
-                closeness_map=flat_floor(bottom_val=bot, top_val=0.07),
+                closeness_map=m,
             )
         )
 
@@ -76,12 +85,15 @@ def build_synthetic_calibration_suite(
             )
         )
 
-    # 3. Center corridor obstacles (including full close wall)
-    for i, (cx1, cx2, y1, y2, val, note) in enumerate(
+    # 3. Center corridor obstacles (including close blank wall, low crate, shin block & overhang)
+    for i, (cx1, cx2, y1, y2, val, spread_m, note) in enumerate(
         [
-            (0.35, 0.65, 0.28, 0.80, 0.88, "Pillar / bollard directly ahead"),
-            (0.30, 0.70, 0.30, 0.84, 0.92, "Office chair blocking center hallway"),
-            (0.00, 1.00, 0.20, 0.94, 0.94, "Closed door / wall 0.6m ahead (full frame)"),
+            (0.35, 0.65, 0.28, 0.80, 0.88, 600, "Pillar / bollard directly ahead"),
+            (0.30, 0.70, 0.30, 0.84, 0.92, 600, "Office chair blocking center hallway"),
+            (0.00, 1.00, 0.20, 0.94, 0.94, 40, "Closed door / blank wall 0.4m ahead (full frame)"),
+            (0.18, 0.82, 0.66, 0.94, 0.92, 700, "Low delivery crate in center path (anti-curb check)"),
+            (0.24, 0.76, 0.80, 0.95, 0.94, 700, "Shin-height tripping block near feet"),
+            (0.30, 0.70, 0.05, 0.19, 0.92, 750, "Head-level overhanging sign / cabinet"),
         ],
         start=1,
     ):
@@ -93,6 +105,7 @@ def build_synthetic_calibration_suite(
                 label="obstacle_center",
                 note=note,
                 closeness_map=m,
+                raw_spread_milli=spread_m,
             )
         )
 
@@ -126,7 +139,6 @@ def build_synthetic_calibration_suite(
     ):
         m = flat_floor(bottom_val=0.70, top_val=0.10)
         cut = int(h * drop_y_ratio)
-        # Everything beyond the curb edge suddenly drops farther away (lower closeness)
         m[:cut, :] = np.clip(m[:cut, :] - drop_amount, 0.04, 1.0)
         scenes.append(
             SyntheticCalibrationScene(
@@ -141,14 +153,15 @@ def build_synthetic_calibration_suite(
 
 
 class DatasetStore:
-    """Stores real hallway snapshots captured from phone/webcam for midterm benchmarking."""
+    """Thread-safe atomic store for real hallway snapshots captured from phone/webcam."""
 
     def __init__(self, data_dir: Path = DATA_DIR) -> None:
         self.data_dir = data_dir
         self.meta_file = data_dir / "metadata.json"
+        self._lock = threading.Lock()
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-    def _read_meta(self) -> list[dict]:
+    def _read_meta_unlocked(self) -> list[dict]:
         if not self.meta_file.exists():
             return []
         try:
@@ -156,11 +169,14 @@ class DatasetStore:
         except (json.JSONDecodeError, OSError):
             return []
 
-    def _write_meta(self, rows: list[dict]) -> None:
-        self.meta_file.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    def _write_meta_unlocked(self, rows: list[dict]) -> None:
+        tmp_path = self.meta_file.with_suffix(f".{uuid.uuid4().hex[:6]}.tmp")
+        tmp_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        os.replace(tmp_path, self.meta_file)
 
     def list_samples(self, include_thumbnails: bool = True) -> list[SampleRecord]:
-        rows = self._read_meta()
+        with self._lock:
+            rows = self._read_meta_unlocked()
         records: list[SampleRecord] = []
         for row in rows:
             img_path = self.data_dir / f"{row['sample_id']}.jpg"
@@ -187,36 +203,43 @@ class DatasetStore:
         img_path.write_bytes(jpeg_bytes)
 
         now = time.time()
-        rows = self._read_meta()
-        rows.append(
-            {
-                "sample_id": sample_id,
-                "label": label,
-                "note": note.strip() or f"Captured {label.replace('_', ' ')}",
-                "created_at": now,
-            }
-        )
-        self._write_meta(rows)
+        clean_note = note.strip() or f"Captured {label.replace('_', ' ')}"
+        with self._lock:
+            rows = self._read_meta_unlocked()
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "label": label,
+                    "note": clean_note,
+                    "created_at": now,
+                }
+            )
+            self._write_meta_unlocked(rows)
+
         return SampleRecord(
             sample_id=sample_id,
             label=label,
-            note=rows[-1]["note"],
+            note=clean_note,
             source="real",
             created_at=now,
             image_b64=base64.b64encode(jpeg_bytes).decode("ascii"),
         )
 
     def get_image_bytes(self, sample_id: str) -> bytes | None:
-        img_path = self.data_dir / f"{sample_id}.jpg"
+        # Guard path traversal on sample_id
+        safe_name = Path(sample_id).name
+        img_path = self.data_dir / f"{safe_name}.jpg"
         return img_path.read_bytes() if img_path.exists() else None
 
     def delete_sample(self, sample_id: str) -> bool:
-        rows = self._read_meta()
-        new_rows = [r for r in rows if r["sample_id"] != sample_id]
-        if len(new_rows) == len(rows):
-            return False
-        self._write_meta(new_rows)
-        img_path = self.data_dir / f"{sample_id}.jpg"
+        safe_name = Path(sample_id).name
+        with self._lock:
+            rows = self._read_meta_unlocked()
+            new_rows = [r for r in rows if r["sample_id"] != safe_name]
+            if len(new_rows) == len(rows):
+                return False
+            self._write_meta_unlocked(new_rows)
+        img_path = self.data_dir / f"{safe_name}.jpg"
         if img_path.exists():
-            img_path.unlink()
+            img_path.unlink(missing_ok=True)
         return True

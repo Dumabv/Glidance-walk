@@ -1,0 +1,67 @@
+name: Glidance v2.2 Build & Verify (macOS Apple Silicon + Windows + WASM)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  rust-and-backend:
+    strategy:
+      matrix:
+        include:
+          - os: macos-15
+            artifact_name: glidance_core-macos-arm64
+            lib_src: rust_core/target/release/libglidance_core.dylib
+            lib_dst: backend/vision/libglidance_core.dylib
+          - os: windows-latest
+            artifact_name: glidance_core-windows-x64
+            lib_src: rust_core/target/release/glidance_core.dll
+            lib_dst: backend/vision/glidance_core.dll
+          - os: ubuntu-latest
+            artifact_name: glidance_core-linux-x64
+            lib_src: rust_core/target/release/libglidance_core.so
+            lib_dst: backend/vision/libglidance_core.so
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Rust unit tests & native + WASM build
+        working-directory: rust_core
+        run: |
+          cargo test --release
+          cargo build --release
+          cargo build --target wasm32-unknown-unknown --release
+      - name: Install native library into backend/vision
+        shell: bash
+        run: cp "${{ matrix.lib_src }}" "${{ matrix.lib_dst }}"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install backend test dependencies
+        run: pip install fastapi uvicorn pydantic numpy opencv-python-headless pillow httpx pytest
+      - name: Run backend tests (Rust vs NumPy parity + API/WS)
+        run: pytest -v backend/tests/test_hazard_and_api.py
+      - name: Upload native binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.lib_dst }}
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend PWA
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build

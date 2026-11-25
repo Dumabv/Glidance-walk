@@ -1,17 +1,15 @@
-# Python
-backend/.venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
 .pytest_cache/
-
-# Node / Frontend
-frontend/node_modules/
+backend/.cache/
+backend/vision/*.dll
+backend/vision/*.dylib
+backend/vision/*.so
+rust_core/target/
+node_modules/
 frontend/dist/
 *.tsbuildinfo
-*.local
-
-# Local runtime & OS
 .DS_Store
-Thumbs.db
-.env
-backend/data/captured_sessions/
+*.log
