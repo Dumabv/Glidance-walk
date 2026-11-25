@@ -4,7 +4,6 @@ import {
   CameraOff,
   ChevronDown,
   ChevronUp,
-  Cpu,
   Lock,
   Radio,
   Save,
@@ -33,7 +32,6 @@ import {
 import { SpatialMemoryEngine } from '../services/spatialMemory';
 import { UltrasonicBatSonar } from '../services/ultrasonicSonar';
 import type {
-  ExecutionMode,
   GuidancePayload,
   SampleLabel,
   SpatialMemorySnapshot,
@@ -94,7 +92,6 @@ export function MobileWalker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const workerRef = useRef<Worker | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasCtxRef = useRef<CanvasRenderingContext2D | null>(null);
   const rvfcHandleRef = useRef<number | null>(null);
@@ -109,19 +106,15 @@ export function MobileWalker() {
   const encodingRef = useRef(false);
   const lastSendAtRef = useRef(0);
   const lastValidFrameAtRef = useRef(0);
-  const activeRuntimeRef = useRef<'ws' | 'worker'>('ws');
-  const workerReadyRef = useRef(false);
   const pitchDegRef = useRef(0);
   const rollDegRef = useRef(0);
   const iosSwitchLabelRef = useRef<HTMLLabelElement | null>(null);
 
-  const [execMode, setExecMode] = useState<ExecutionMode>('auto');
   const [streaming, setStreaming] = useState(false);
   const [facingMode, setFacingMode] = useState<CameraFacingMode>('environment');
   const [cameraDeviceLabel, setCameraDeviceLabel] = useState<string | null>(null);
   const [switchingCamera, setSwitchingCamera] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
-  const [workerStatus, setWorkerStatus] = useState<string>('idle');
   const [signalLost, setSignalLost] = useState(false);
   const [tiltWarning, setTiltWarning] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -152,8 +145,6 @@ export function MobileWalker() {
   const videoAspectRef = useRef<'portrait' | 'landscape'>('portrait');
   const dispatchFrameRef = useRef<() => void>(() => {});
   const lastAnnouncedSteeringRef = useRef<string | null>(null);
-  const execModeRef = useRef<ExecutionMode>(execMode);
-  execModeRef.current = execMode;
 
   const audioRef = useRef<SpatialAudioEngine | null>(null);
   const hapticsRef = useRef<HapticsEngine | null>(null);
@@ -291,31 +282,6 @@ export function MobileWalker() {
     }
   }, []);
 
-  const ensureWorker = useCallback(() => {
-    if (workerRef.current) return workerRef.current;
-    const worker = new Worker(
-      new URL('../workers/vision.worker.ts', import.meta.url),
-      { type: 'module' }
-    );
-    worker.onmessage = (evt) => {
-      const msg = evt.data;
-      if (msg?.type === 'worker_status') {
-        setWorkerStatus(`${msg.status}: ${msg.detail}`);
-        if (msg.status === 'ready') {
-          workerReadyRef.current = true;
-        }
-      } else if (msg?.type === 'guidance' && msg.guidance) {
-        handleIncomingGuidance(msg.guidance as GuidancePayload);
-      } else if (msg?.type === 'worker_error') {
-        inFlightRef.current = false;
-        setWorkerStatus(`error: ${msg.detail}`);
-      }
-    };
-    worker.postMessage({ type: 'init' });
-    workerRef.current = worker;
-    return worker;
-  }, [handleIncomingGuidance]);
-
   const acquireWakeLock = useCallback(async () => {
     try {
       if ('wakeLock' in navigator && document.visibilityState === 'visible') {
@@ -426,8 +392,6 @@ export function MobileWalker() {
       document.removeEventListener('visibilitychange', onVisibility);
       stopSession();
       batSonarRef.current?.stop();
-      workerRef.current?.terminate();
-      workerRef.current = null;
       audioRef.current?.dispose();
     };
   }, [acquireWakeLock, stopSession]);
@@ -492,7 +456,7 @@ export function MobileWalker() {
     const isPortrait = vh > vw;
 
     // Aspect-preserving ViT-14 aligned dimensions (eliminates 1.78x portrait squash!)
-    const maxSide = activeRuntimeRef.current === 'worker' ? 252 : 322;
+    const maxSide = 322;
     const scale = Math.min(1, maxSide / Math.max(vw, vh));
     const targetW = Math.max(112, Math.round((vw * scale) / 14) * 14);
     const targetH = Math.max(112, Math.round((vh * scale) / 14) * 14);
@@ -503,43 +467,7 @@ export function MobileWalker() {
       setVideoAspect(nextAspect);
     }
 
-    const useWorker =
-      execModeRef.current === 'on_phone' ||
-      (execModeRef.current === 'auto' && activeRuntimeRef.current === 'worker');
-
-    // Path A: 100% Standalone On-Phone Worker (`ImageBitmap` zero-JPEG transfer -> WebGPU/WASM + Rust `.wasm`)
-    if (useWorker) {
-      const worker = ensureWorker();
-      inFlightRef.current = true;
-      encodingRef.current = true;
-      lastSendAtRef.current = now;
-      const clientTs = Date.now();
-      createImageBitmap(video, {
-        resizeWidth: targetW,
-        resizeHeight: targetH,
-        resizeQuality: 'low',
-      })
-        .then((bitmap) => {
-          encodingRef.current = false;
-          worker.postMessage(
-            {
-              type: 'frame',
-              bitmap,
-              clientTs,
-              pitchDeg: pitchDegRef.current,
-              rollDeg: rollDegRef.current,
-            },
-            [bitmap]
-          );
-        })
-        .catch(() => {
-          encodingRef.current = false;
-          inFlightRef.current = false;
-        });
-      return;
-    }
-
-    // Path B: Tethered Low-Latency Binary WebSocket (`[f64 ts][f32 pitch][f32 roll] + JPEG`)
+    // Tethered Low-Latency Binary WebSocket (`[f64 ts][f32 pitch][f32 roll] + JPEG`)
     const ws = wsRef.current;
     const canvas = canvasRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !canvas) return;
@@ -583,13 +511,13 @@ export function MobileWalker() {
       'image/jpeg',
       0.68
     );
-  }, [ensureWorker]);
+  }, []);
 
   dispatchFrameRef.current = dispatchFrame;
 
   const connectWebSocket = useCallback(
     (attempt = 0) => {
-      if (!sessionActiveRef.current || execModeRef.current === 'on_phone') return;
+      if (!sessionActiveRef.current) return;
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/phone`);
       wsRef.current = ws;
@@ -597,7 +525,6 @@ export function MobileWalker() {
       ws.onopen = () => {
         setWsConnected(true);
         setErrorMsg(null);
-        activeRuntimeRef.current = 'ws';
         lastValidFrameAtRef.current = performance.now();
       };
 
@@ -610,21 +537,9 @@ export function MobileWalker() {
         }
       };
 
-      ws.onerror = () => {
-        if (execModeRef.current === 'auto') {
-          // Seamless hot-failover to Standalone On-Phone WebWorker + Rust `.wasm`!
-          activeRuntimeRef.current = 'worker';
-          ensureWorker();
-        }
-      };
-
       ws.onclose = () => {
         setWsConnected(false);
         if (!sessionActiveRef.current) return;
-        if (execModeRef.current === 'auto') {
-          activeRuntimeRef.current = 'worker';
-          ensureWorker();
-        }
         const delay = Math.min(2500, 300 * Math.pow(1.7, attempt));
         reconnectTimerRef.current = window.setTimeout(
           () => connectWebSocket(attempt + 1),
@@ -632,7 +547,7 @@ export function MobileWalker() {
         );
       };
     },
-    [ensureWorker, handleIncomingGuidance]
+    [handleIncomingGuidance]
   );
 
   const startSession = async () => {
@@ -686,18 +601,7 @@ export function MobileWalker() {
     lastValidFrameAtRef.current = performance.now();
     setStreaming(true);
 
-    if (execMode === 'on_phone') {
-      activeRuntimeRef.current = 'worker';
-      ensureWorker();
-    } else {
-      activeRuntimeRef.current = 'ws';
-      connectWebSocket(0);
-      if (execMode === 'auto') {
-        // Warm up standalone worker in background for instant zero-drop failover
-        ensureWorker();
-      }
-    }
-
+    connectWebSocket(0);
     startFrameLoop();
 
     // Adaptive RTT-Aware Watchdog: avoids false alarms on 4G / Cloudflare tunnels while catching real stalls!
@@ -705,10 +609,7 @@ export function MobileWalker() {
       if (!sessionActiveRef.current || switchingCameraRef.current) return;
       const track = streamRef.current?.getVideoTracks()[0];
       const trackDead = !track || track.readyState === 'ended';
-      const graceMs =
-        activeRuntimeRef.current === 'worker' && !workerReadyRef.current
-          ? 14000
-          : Math.max(3600, Math.min(8500, smoothedRttRef.current * 3.5));
+      const graceMs = Math.max(3600, Math.min(8500, smoothedRttRef.current * 3.5));
       const stale = performance.now() - lastValidFrameAtRef.current > graceMs;
 
       if (trackDead || stale) {
@@ -855,7 +756,7 @@ export function MobileWalker() {
         >
           <Radio className="h-3.5 w-3.5" aria-hidden="true" />
           {streaming
-            ? `${fps.toFixed(1)} FPS · ${rttMs}ms (${(guidance?.kernel_backend ?? activeRuntimeRef.current).toUpperCase()})`
+            ? `${fps.toFixed(1)} FPS · ${rttMs}ms (${(guidance?.kernel_backend ?? 'ws').toUpperCase()})`
             : 'Standby'}
         </span>
       </div>
@@ -882,52 +783,6 @@ export function MobileWalker() {
           />
         </label>
       </span>
-
-      {/* Execution Mode Selector: Auto Failover vs Tethered Server vs 100% On-Phone Standalone */}
-      <div
-        role="group"
-        aria-label="Inference execution mode"
-        className="grid grid-cols-3 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 text-xs font-semibold"
-      >
-        {(
-          [
-            { id: 'auto', label: 'Auto (Failover)' },
-            { id: 'tethered', label: 'Laptop Server' },
-            { id: 'on_phone', label: 'On-Phone WASM' },
-          ] as const
-        ).map((m) => (
-          <button
-            key={m.id}
-            type="button"
-            disabled={eyesFreeLock}
-            aria-pressed={execMode === m.id}
-            onClick={() => {
-              hapticsRef.current?.triggerTapFeedback();
-              setExecMode(m.id);
-              if (m.id === 'on_phone') {
-                activeRuntimeRef.current = 'worker';
-                ensureWorker();
-              } else if (m.id === 'tethered') {
-                activeRuntimeRef.current = 'ws';
-              }
-            }}
-            className={`rounded-lg px-2 py-2 transition ${
-              execMode === m.id
-                ? 'bg-sky-500 text-slate-950 font-bold'
-                : 'text-slate-300 hover:bg-slate-800'
-            } disabled:opacity-50`}
-          >
-            {m.label}
-          </button>
-        ))}
-      </div>
-
-      {workerStatus !== 'idle' && (execMode === 'on_phone' || activeRuntimeRef.current === 'worker') && (
-        <p className="flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-950/40 px-3 py-1.5 text-xs text-sky-200">
-          <Cpu className="h-3.5 w-3.5 shrink-0 text-sky-400" aria-hidden="true" />
-          <span>{workerStatus}</span>
-        </p>
-      )}
 
       {tiltWarning && (
         <div
