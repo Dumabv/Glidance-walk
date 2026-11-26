@@ -486,3 +486,42 @@ def test_blank_vertical_wall_triggers_stop_while_far_wall_and_floor_stay_clear()
     floor_res = fuse_close_range_metric_depth(base_haz, open_floor, pitch_deg=72.0, config=cfg)
     assert floor_res.steering == "CLEAR"
     assert floor_res.overall_severity == "clear"
+
+
+def test_relative_large_model_planar_wall_triggers_stop_and_ignores_clear_floors() -> None:
+    """Relative models (Depth-Anything-V2-Large-FP16 ONNX) must STOP on blank walls and ignore open floors."""
+    from backend.vision.hazard_detector import fuse_relative_planar_wall
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+
+    h, w = 180, 140
+    # 1. Tilted-down blank wall (top closer ~0.68 -> baseboard farther ~0.05) -> STOP
+    wall_cl = np.repeat(np.linspace(0.70, 0.04, h, dtype=np.float32)[:, None], w, axis=1)
+    res_wall = fuse_relative_planar_wall(base_haz, wall_cl, pitch_deg=72.0, config=cfg)
+    assert res_wall.steering == "STOP"
+    assert res_wall.overall_severity == "danger"
+    assert res_wall.wall_override is True
+    assert "Wall ahead" in res_wall.spoken_cue
+
+    # 2. Straight-on close wall (uniform closeness ~0.82 top-to-bottom) -> STOP
+    flat_wall = np.full((h, w), 0.82, dtype=np.float32)
+    res_flat = fuse_relative_planar_wall(base_haz, flat_wall, pitch_deg=88.0, config=cfg)
+    assert res_flat.steering == "STOP"
+    assert res_flat.wall_override is True
+
+    # 3. Open floor (top far ~0.10 -> bottom close ~0.75) -> stays CLEAR
+    floor_cl = np.repeat(np.linspace(0.10, 0.75, h, dtype=np.float32)[:, None], w, axis=1)
+    res_floor = fuse_relative_planar_wall(base_haz, floor_cl, pitch_deg=72.0, config=cfg)
+    assert res_floor.steering == "CLEAR"
+    assert res_floor.wall_override is False
+
+    # 4. Aimed at ceiling (pitch=130°) -> ignored so ceiling never triggers wall STOP
+    res_ceil = fuse_relative_planar_wall(base_haz, wall_cl, pitch_deg=130.0, config=cfg)
+    assert res_ceil.steering == "CLEAR"

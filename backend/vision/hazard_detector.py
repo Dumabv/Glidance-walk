@@ -1124,3 +1124,83 @@ def fuse_close_range_metric_depth(
         center=center_z,
         right=right_z,
     )
+
+
+def fuse_relative_planar_wall(
+    haz: HazardResult,
+    closeness: np.ndarray,
+    pitch_deg: float,
+    config: CalibrationConfig,
+) -> HazardResult:
+    """Detects blank vertical walls on relative depth models (e.g. Depth-Anything-V2-Large-FP16 ONNX).
+
+    On relative models normalized via `[p2, p98]`, an open hallway floor has strongly negative
+    `c_top - c_bot` (`-0.30` to `-0.70`, bottom much closer than top). A blank vertical wall with
+    visible baseboard/floor flips the slope (`c_top - c_bot >= +0.22`) while staying horizontally
+    uniform across L/C/R (`h_spread <= 0.14`). A straight-on close wall produces uniform high
+    closeness (`>= 0.70`) top-to-bottom.
+    """
+    if haz.lens_blocked or haz.curb.detected or haz.wall_override:
+        return haz
+
+    has_live_imu = bool(np.isfinite(pitch_deg) and abs(pitch_deg) > 1.0)
+    if has_live_imu and (pitch_deg < 45.0 or pitch_deg > 115.0):
+        return haz
+
+    h, w = closeness.shape[:2]
+    if h < 16 or w < 16:
+        return haz
+
+    c_top = float(np.median(closeness[(h * 12) // 100 : (h * 35) // 100, :]))
+    c_bot = float(np.median(closeness[(h * 65) // 100 : (h * 88) // 100, :]))
+    if not (np.isfinite(c_top) and np.isfinite(c_bot)):
+        return haz
+
+    wb = closeness[(h * 15) // 100 : (h * 65) // 100, :]
+    x1, x2 = w // 3, (2 * w) // 3
+    cl_l = float(np.median(wb[:, 0:x1]))
+    cl_c = float(np.median(wb[:, x1:x2]))
+    cl_r = float(np.median(wb[:, x2:w]))
+    h_spread = max(cl_l, cl_c, cl_r) - min(cl_l, cl_c, cl_r)
+
+    inverted_wall = (c_top - c_bot) >= 0.22 and c_top >= 0.45 and h_spread <= 0.14
+    flat_close_wall = c_top >= 0.70 and c_bot >= 0.70 and abs(c_top - c_bot) <= 0.15 and h_spread <= 0.12
+    if not (inverted_wall or flat_close_wall):
+        return haz
+
+    wall_score = round(min(1.0, max(config.danger_threshold + 0.20, 0.85)), 4)
+    left_z = ZoneMetrics(
+        severity="danger",
+        obstacle_score=max(haz.left.obstacle_score, wall_score),
+        min_distance_m=round(min(haz.left.min_distance_m, 1.0), 2),
+        coverage_ratio=max(haz.left.coverage_ratio, 0.9),
+    )
+    center_z = ZoneMetrics(
+        severity="danger",
+        obstacle_score=max(haz.center.obstacle_score, wall_score),
+        min_distance_m=round(min(haz.center.min_distance_m, 1.0), 2),
+        coverage_ratio=max(haz.center.coverage_ratio, 0.9),
+    )
+    right_z = ZoneMetrics(
+        severity="danger",
+        obstacle_score=max(haz.right.obstacle_score, wall_score),
+        min_distance_m=round(min(haz.right.min_distance_m, 1.0), 2),
+        coverage_ratio=max(haz.right.coverage_ratio, 0.9),
+    )
+    ov_code, act_code = decide_guidance_verified(
+        2, int(round(left_z.obstacle_score * 1000)),
+        2, int(round(center_z.obstacle_score * 1000)),
+        2, int(round(right_z.obstacle_score * 1000)),
+        False,
+        True,
+    )
+    return replace(
+        haz,
+        overall_severity=SEVERITY_BY_CODE[ov_code],
+        steering=STEERING_BY_CODE[act_code],
+        spoken_cue="Wall ahead. Stop.",
+        left=left_z,
+        center=center_z,
+        right=right_z,
+        wall_override=True,
+    )
