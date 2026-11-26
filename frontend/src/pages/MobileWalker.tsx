@@ -1457,7 +1457,7 @@ export function MobileWalker() {
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center gap-2">
                     <span className="rounded-full bg-slate-950/85 px-3 py-1 text-xs font-bold text-sky-300 backdrop-blur">
-                      {fps} FPS · {rttMs} ms
+                      {fps} FPS · {rttMs} ms{guidance?.pitch_deg != null ? ` · ${Math.round(guidance.pitch_deg)}°` : ''}
                     </span>
                     {guidance && (
                       <span className="rounded-full bg-slate-950/85 px-3 py-1 text-sm font-black text-white backdrop-blur">

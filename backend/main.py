@@ -355,8 +355,22 @@ def _process_frame_critical_path(
         haz = fuse_close_range_metric_depth(haz, depth_m, pitch_deg, detector.config)
     if obj_detector.is_active and depth_m is not None:
         obj_res = obj_detector.detect(dec.rgb, depth_m)
-        haz = detector.fuse_objects(haz, obj_res.objects, stateful=True)
-        detected_objects = list(obj_res.objects)
+        raw_objects = list(obj_res.objects)
+        # IMU + Depth Flat-Floor Guard: tiled/striped floors viewed downward (0 < pitch < 48 deg)
+        # or completely flat floors (clear center + low curb gradient) should not trigger false `stairs`.
+        looking_at_floor = 0.0 < pitch_deg < 48.0
+        flat_floor_depth = haz.center.severity == "clear" and haz.curb.gradient_peak < 0.055
+        filtered_objects = []
+        for obj in raw_objects:
+            if obj.label in ("stairs", "step", "curb"):
+                if looking_at_floor and obj.confidence < 0.72 and haz.curb.gradient_peak < 0.06:
+                    continue
+                if flat_floor_depth and obj.confidence < 0.65 and obj.distance_m > 1.8:
+                    continue
+            filtered_objects.append(obj)
+
+        haz = detector.fuse_objects(haz, filtered_objects, stateful=True)
+        detected_objects = filtered_objects
         yolo_ms = obj_res.yolo_ms
     else:
         haz = detector.fuse_objects(haz, [], stateful=True)
