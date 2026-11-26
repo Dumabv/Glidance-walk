@@ -1547,62 +1547,7 @@ export function MobileWalker() {
           )}
           {isFullscreen && (
             <>
-              {/* Live AR Bounding Box Overlay (30 FPS SVG, <0.1ms) */}
-              {guidance?.objects && guidance.objects.length > 0 && (
-                <svg
-                  viewBox="0 0 100 100"
-                  preserveAspectRatio="none"
-                  className="pointer-events-none absolute inset-0 h-full w-full"
-                >
-                  {guidance.objects.slice(0, 5).map((obj, idx) => {
-                    const [bx1, by1, bx2, by2] = obj.bbox_norm;
-                    const x = Math.max(0, Math.min(99, bx1 * 100));
-                    const y = Math.max(0, Math.min(99, by1 * 100));
-                    const w = Math.max(1, Math.min(100 - x, (bx2 - bx1) * 100));
-                    const h = Math.max(1, Math.min(100 - y, (by2 - by1) * 100));
-                    const isApp = approachingAlert && approachingAlert.label === obj.label.toLowerCase();
-                    const stroke =
-                      isApp || obj.severity === 'danger'
-                        ? '#ef4444'
-                        : obj.severity === 'caution'
-                          ? '#f59e0b'
-                          : '#38bdf8';
-                    return (
-                      <g key={`ar-${obj.label}-${idx}`}>
-                        <rect
-                          x={x}
-                          y={y}
-                          width={w}
-                          height={h}
-                          fill={isApp ? 'rgba(239,68,68,0.16)' : 'none'}
-                          stroke={stroke}
-                          strokeWidth="0.7"
-                          rx="1.2"
-                        />
-                        <rect
-                          x={x}
-                          y={Math.max(0, y - 4.2)}
-                          width={Math.min(46, Math.max(18, (obj.label.length + 7) * 1.9))}
-                          height="4.2"
-                          fill="rgba(2,6,23,0.82)"
-                          rx="0.8"
-                        />
-                        <text
-                          x={x + 1.0}
-                          y={Math.max(3.1, y - 1.1)}
-                          fill={stroke}
-                          fontSize="2.7"
-                          fontWeight="800"
-                        >
-                          {`${isApp ? '⚡ ' : ''}${obj.label.toUpperCase()} ~${obj.distance_m.toFixed(1)}m`}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </svg>
-              )}
-
-              {/* Top HUD: detected objects, approx distance, FPS/RTT, Voice/Lang & Exit */}
+              {/* Top HUD: detected objects, approx distance, FPS/RTT, Describe/Torch/Voice & Exit */}
               <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/80 via-black/45 to-transparent p-4">
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center gap-2">
