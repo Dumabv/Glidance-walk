@@ -607,12 +607,14 @@ export class SpatialMemoryEngine {
       steering = 'STOP';
     } else if (confirmedCurb) {
       steering = 'CURB_DROP';
-      if (cameraBand !== 'down') {
+      if (rememberedCurb && !rawHadCurb && cameraBand !== 'down') {
         memoryHint = `Remembered step/curb below (${downAhead.minDist.toFixed(1)}m ahead)`;
       }
-    } else if (confirmedOverhead && cameraBand === 'down') {
+    } else if (confirmedOverhead && (Boolean(raw.overhead_hazard) || cameraBand === 'down')) {
       steering = 'STOP';
-      memoryHint = `Remembered head overhang above (${upAhead.minDist.toFixed(1)}m ahead)`;
+      if (!raw.overhead_hazard) {
+        memoryHint = `Remembered head overhang above (${upAhead.minDist.toFixed(1)}m ahead)`;
+      }
     } else if (fC.zone.severity === 'danger') {
       const leftSafe = fL.zone.severity !== 'danger' && !blindLeftDanger;
       const rightSafe = fR.zone.severity !== 'danger' && !blindRightDanger;
