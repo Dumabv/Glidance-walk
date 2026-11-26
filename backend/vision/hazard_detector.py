@@ -258,7 +258,9 @@ class GroundAwareHazardDetector:
         self._yolo_alert_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._yolo_danger_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._last_steer: SteeringAction = "CLEAR"
+        self._steer_switch_streak: int = 0
         self._flat_wall_streak: int = 0
+        self._rel_wall_streak: int = 0
 
     @staticmethod
     def _to_c_config(cfg: CalibrationConfig) -> _CCalibrationConfig:
@@ -286,7 +288,9 @@ class GroundAwareHazardDetector:
             self._yolo_alert_streak = {"left": 0, "center": 0, "right": 0}
             self._yolo_danger_streak = {"left": 0, "center": 0, "right": 0}
             self._last_steer = "CLEAR"
+            self._steer_switch_streak = 0
             self._flat_wall_streak = 0
+            self._rel_wall_streak = 0
 
     def fuse_objects(
         self,
@@ -359,6 +363,55 @@ class GroundAwareHazardDetector:
                 self.config,
             )
 
+        # Narrow-corridor side-wall de-escalation:
+        # In tight indoor hallways/aisles, parallel walls on one side often saturate relative depth
+        # while the center path is completely open. When center is CLEAR and only one side has a
+        # non-imminent (>= 0.85m) hazard with no close foreground YOLO obstacle (< 1.1m) on that side,
+        # keep directional guidance (VEER_LEFT / VEER_RIGHT) at `caution` instead of constant `danger`.
+        if (
+            not fused.curb.detected
+            and not fused.wall_override
+            and not fused.overhead_hazard
+            and fused.center.severity == "clear"
+            and (fused.left.severity == "danger") != (fused.right.severity == "danger")
+        ):
+            hot_side: Corridor = "left" if fused.left.severity == "danger" else "right"
+            hot_z = fused.left if hot_side == "left" else fused.right
+            has_close_fg = any(
+                o.corridor == hot_side
+                and o.confidence >= 0.40
+                and o.distance_m < 1.10
+                and o.label != "wall"
+                for o in stabilized_objs
+            )
+            if hot_z.min_distance_m >= 0.85 and not has_close_fg:
+                demoted_score = round(min(hot_z.obstacle_score, max(self.config.caution_threshold + 0.05, self.config.danger_threshold - 0.03)), 4)
+                demoted_z = ZoneMetrics(
+                    severity="caution",
+                    obstacle_score=demoted_score,
+                    min_distance_m=hot_z.min_distance_m,
+                    coverage_ratio=hot_z.coverage_ratio,
+                )
+                left_z = demoted_z if hot_side == "left" else fused.left
+                right_z = demoted_z if hot_side == "right" else fused.right
+                ov_code, act_code = decide_guidance_verified(
+                    _SEV_TO_CODE[left_z.severity],
+                    int(round(left_z.obstacle_score * 1000)),
+                    _SEV_TO_CODE[fused.center.severity],
+                    int(round(fused.center.obstacle_score * 1000)),
+                    _SEV_TO_CODE[right_z.severity],
+                    int(round(right_z.obstacle_score * 1000)),
+                    False,
+                    True,
+                )
+                fused = replace(
+                    fused,
+                    overall_severity=SEVERITY_BY_CODE[ov_code],
+                    steering=STEERING_BY_CODE[act_code],
+                    left=left_z,
+                    right=right_z,
+                )
+
         # Directional hysteresis: prevent rapid VEER_LEFT <-> VEER_RIGHT ping-pong when both sides are safe.
         # Strictly preserves Lean 4 "Never Steer Into Danger" (never holds a direction whose corridor is `danger`).
         with self._lock:
@@ -374,11 +427,14 @@ class GroundAwareHazardDetector:
                 new_z = fused.left if steering == "VEER_LEFT" else fused.right
                 prev_code = _SEV_TO_CODE[prev_z.severity]
                 new_code = _SEV_TO_CODE[new_z.severity]
-                if (
+                self._steer_switch_streak += 1
+                hold_by_margin = (
                     prev_code < 2
                     and prev_code <= new_code
                     and (prev_z.obstacle_score - new_z.obstacle_score) < 0.22
-                ):
+                )
+                hold_by_debounce = prev_code < 2 and self._steer_switch_streak < 2
+                if hold_by_margin or hold_by_debounce:
                     steering = prev_steer
                     if steering == "VEER_LEFT":
                         if "on left" in spoken.lower():
@@ -390,6 +446,10 @@ class GroundAwareHazardDetector:
                             spoken = "Obstacle ahead. Step right."
                         else:
                             spoken = spoken.replace("Step left.", "Step right.").replace("Move left.", "Move right.")
+                else:
+                    self._steer_switch_streak = 0
+            else:
+                self._steer_switch_streak = 0
             self._last_steer = steering
 
         if steering != fused.steering or spoken != fused.spoken_cue:
@@ -1300,6 +1360,9 @@ def fuse_relative_planar_wall(
     closeness: np.ndarray,
     pitch_deg: float,
     config: CalibrationConfig,
+    *,
+    detector: GroundAwareHazardDetector | None = None,
+    stateful: bool = False,
 ) -> HazardResult:
     """Detects blank vertical walls on relative depth models (e.g. Depth-Anything-V2-Large-FP16 ONNX).
 
@@ -1308,21 +1371,32 @@ def fuse_relative_planar_wall(
     visible baseboard/floor flips the slope (`c_top - c_bot >= +0.22`) while staying horizontally
     uniform across L/C/R (`h_spread <= 0.14`). A straight-on close wall produces uniform high
     closeness (`>= 0.70`) top-to-bottom.
+
+    When `stateful=True` with a `detector`, requires `confirm_frames` consecutive frames so
+    single-frame camera tilt, shelves, or stairwells never trigger false `STOP` overrides.
     """
     if haz.lens_blocked or haz.curb.detected or haz.wall_override:
+        if stateful and detector is not None:
+            detector._rel_wall_streak = 0
         return haz
 
     has_live_imu = bool(np.isfinite(pitch_deg) and abs(pitch_deg) > 1.0)
     if has_live_imu and (pitch_deg < 45.0 or pitch_deg > 115.0):
+        if stateful and detector is not None:
+            detector._rel_wall_streak = 0
         return haz
 
     h, w = closeness.shape[:2]
     if h < 16 or w < 16:
+        if stateful and detector is not None:
+            detector._rel_wall_streak = 0
         return haz
 
     c_top = float(np.median(closeness[(h * 12) // 100 : (h * 35) // 100, :]))
     c_bot = float(np.median(closeness[(h * 65) // 100 : (h * 88) // 100, :]))
     if not (np.isfinite(c_top) and np.isfinite(c_bot)):
+        if stateful and detector is not None:
+            detector._rel_wall_streak = 0
         return haz
 
     wb = closeness[(h * 15) // 100 : (h * 65) // 100, :]
@@ -1335,7 +1409,15 @@ def fuse_relative_planar_wall(
     inverted_wall = (c_top - c_bot) >= 0.22 and c_top >= 0.45 and h_spread <= 0.14
     flat_close_wall = c_top >= 0.70 and c_bot >= 0.70 and abs(c_top - c_bot) <= 0.15 and h_spread <= 0.12
     if not (inverted_wall or flat_close_wall):
+        if stateful and detector is not None:
+            detector._rel_wall_streak = 0
         return haz
+
+    if stateful and detector is not None:
+        detector._rel_wall_streak += 1
+        confirm_n = max(2, int(config.confirm_frames))
+        if detector._rel_wall_streak < confirm_n:
+            return haz
 
     wall_score = round(min(1.0, max(config.danger_threshold + 0.20, 0.85)), 4)
     left_z = ZoneMetrics(

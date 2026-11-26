@@ -592,3 +592,81 @@ def test_relative_large_model_planar_wall_triggers_stop_and_ignores_clear_floors
 
     res_ceil = fuse_relative_planar_wall(base_haz, wall_cl, pitch_deg=130.0, config=cfg)
     assert res_ceil.steering == "CLEAR"
+
+
+def test_narrow_indoor_corridor_deescalation_and_relative_wall_debounce() -> None:
+    """Narrow indoor side walls de-escalate to caution when center is clear; relative walls debounce 2 frames & yield to stairs."""
+    from backend.schemas import CurbMetrics, DetectedObject, ZoneMetrics
+    from backend.vision.hazard_detector import HazardResult, fuse_relative_planar_wall
+
+    cfg = CalibrationConfig(confirm_frames=2)
+    det = GroundAwareHazardDetector(cfg)
+
+    clear_z = ZoneMetrics(severity="clear", obstacle_score=0.10, min_distance_m=3.2, coverage_ratio=0.05)
+    side_wall_z = ZoneMetrics(severity="danger", obstacle_score=0.58, min_distance_m=1.15, coverage_ratio=0.45)
+    base = HazardResult(
+        overall_severity="danger",
+        steering="VEER_RIGHT",
+        spoken_cue="Obstacle on left. Step right.",
+        left=side_wall_z,
+        center=clear_z,
+        right=clear_z,
+        curb=CurbMetrics(detected=False, confidence=0.0, drop_row_ratio=0.5, gradient_peak=0.01, stairs_likely=False),
+        hazard_ms=0.2,
+    )
+
+    # 1) Open center + parallel side wall >= 0.85m -> keeps VEER_RIGHT but de-escalates to caution (no alarm fatigue)
+    deesc = det.fuse_objects(base, [], stateful=True)
+    assert deesc.steering == "VEER_RIGHT"
+    assert deesc.overall_severity == "caution"
+    assert deesc.left.severity == "caution"
+
+    # 2) Close foreground person (< 1.1m) on left MUST stay danger
+    close_person = DetectedObject(
+        label="person",
+        confidence=0.88,
+        distance_m=0.85,
+        corridor="left",
+        bbox_norm=[0.05, 0.20, 0.32, 0.85],
+        severity="danger",
+    )
+    det.reset()
+    _ = det.fuse_objects(base, [close_person], stateful=True)
+    kept_danger = det.fuse_objects(base, [close_person], stateful=True)
+    assert kept_danger.overall_severity == "danger"
+    assert kept_danger.steering == "VEER_RIGHT"
+
+    # 3) Stateful fuse_relative_planar_wall requires 2 consecutive frames & yields when curb/stairs detected
+    det.reset()
+    h, w = 180, 140
+    wall_cl = np.repeat(np.linspace(0.72, 0.04, h, dtype=np.float32)[:, None], w, axis=1)
+    clear_haz = replace_curb = HazardResult(
+        overall_severity="clear",
+        steering="CLEAR",
+        spoken_cue="Path clear.",
+        left=clear_z,
+        center=clear_z,
+        right=clear_z,
+        curb=CurbMetrics(detected=False, confidence=0.0, drop_row_ratio=0.5, gradient_peak=0.01, stairs_likely=False),
+        hazard_ms=0.2,
+    )
+    f1 = fuse_relative_planar_wall(clear_haz, wall_cl, pitch_deg=72.0, config=cfg, detector=det, stateful=True)
+    assert f1.wall_override is False
+    assert f1.steering == "CLEAR"
+    f2 = fuse_relative_planar_wall(clear_haz, wall_cl, pitch_deg=72.0, config=cfg, detector=det, stateful=True)
+    assert f2.wall_override is True
+    assert f2.steering == "STOP"
+
+    stairs_haz = HazardResult(
+        overall_severity="danger",
+        steering="CURB_DROP",
+        spoken_cue="Stairs ahead. Slow down.",
+        left=clear_z,
+        center=clear_z,
+        right=clear_z,
+        curb=CurbMetrics(detected=True, confidence=0.9, drop_row_ratio=0.65, gradient_peak=0.18, stairs_likely=True),
+        hazard_ms=0.2,
+    )
+    f_stairs = fuse_relative_planar_wall(stairs_haz, wall_cl, pitch_deg=72.0, config=cfg, detector=det, stateful=True)
+    assert f_stairs.steering == "CURB_DROP"
+    assert f_stairs.wall_override is False
