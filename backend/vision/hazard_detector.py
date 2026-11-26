@@ -830,7 +830,14 @@ def fuse_yolo_with_verified_hazard(
             if obj.label in _STAIRS_CURB_LABELS
             and obj.confidence >= 0.30
             and obj.corridor == "center"
-            and obj.distance_m <= 2.15
+            and (
+                obj.distance_m <= 2.15
+                or (
+                    obj.confidence >= 0.50
+                    and (obj.bbox_norm[3] - obj.bbox_norm[1]) >= 0.28
+                    and obj.bbox_norm[3] >= 0.70
+                )
+            )
         ),
         key=lambda o: o.distance_m,
         default=None,
@@ -866,7 +873,8 @@ def fuse_yolo_with_verified_hazard(
         if cur is None or obj.distance_m < cur.distance_m:
             nearest_by_corridor[obj.corridor] = obj
 
-    if not nearest_by_corridor and not curb_suppressed and not curb_escalated:
+    has_named_context = haz.steering != "CLEAR" and any(o.confidence >= 0.45 for o in objects)
+    if not nearest_by_corridor and not curb_suppressed and not curb_escalated and not has_named_context:
         return haz
 
     zones: dict[Corridor, ZoneMetrics] = {
@@ -924,32 +932,48 @@ def fuse_yolo_with_verified_hazard(
         steering = STEERING_BY_CODE[act_code]
 
     # Enrich spoken_cue with the nearest named object and GUARANTEE non-CLEAR steering never says "Path clear."
+    # If depth already flagged a corridor (steering != CLEAR), fall back to confident YOLO objects in that corridor
+    # even when relative depth_meters estimated > 2.25m, so the user still hears WHAT the obstacle is!
+    def _best_corridor_obj(side: Corridor) -> DetectedObject | None:
+        if side in nearest_by_corridor:
+            return nearest_by_corridor[side]
+        cands = [o for o in objects if o.corridor == side and o.confidence >= 0.45]
+        return min(cands, key=lambda o: o.distance_m, default=None)
+
+    c_named = c_obj or _best_corridor_obj("center")
+    l_named = l_obj or _best_corridor_obj("left")
+    r_named = r_obj or _best_corridor_obj("right")
+
     spoken = haz.spoken_cue
     if curb.detected and visual_step is not None and not overhead_hazard:
+        eff_dist = min(visual_step.distance_m, center_z.min_distance_m)
         if visual_step.label == "stairs" or curb.stairs_likely:
-            spoken = f"Stairs ahead ({visual_step.distance_m:.1f}m). Stop."
+            spoken = f"Stairs ahead ({eff_dist:.1f}m). Stop."
         else:
-            spoken = f"{visual_step.label.capitalize()} ahead ({visual_step.distance_m:.1f}m). Stop."
+            spoken = f"{visual_step.label.capitalize()} ahead ({eff_dist:.1f}m). Stop."
     elif not curb.detected and not overhead_hazard:
         if steering == "STOP":
-            if c_obj is not None:
-                spoken = f"{c_obj.label.capitalize()} blocking path at {c_obj.distance_m:.1f}m. Stop."
-            elif l_obj is not None and r_obj is not None:
-                spoken = f"Narrow gap between {l_obj.label} and {r_obj.label}. Stop."
+            if c_named is not None:
+                eff_dist = min(c_named.distance_m, center_z.min_distance_m)
+                spoken = f"{c_named.label.capitalize()} blocking path at {eff_dist:.1f}m. Stop."
+            elif l_named is not None and r_named is not None:
+                spoken = f"Narrow gap between {l_named.label} and {r_named.label}. Stop."
             else:
                 spoken = "Path blocked ahead. Stop."
         elif steering == "VEER_LEFT":
-            target = c_obj or r_obj
+            target = c_named or r_named
             if target is not None:
+                eff_dist = min(target.distance_m, zones[target.corridor].min_distance_m)
                 where = "ahead" if target.corridor == "center" else "on right"
-                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step left."
+                spoken = f"{target.label.capitalize()} {where} ({eff_dist:.1f}m). Step left."
             elif spoken == "Path clear." or curb_suppressed:
                 spoken = "Obstacle on right. Step left."
         elif steering == "VEER_RIGHT":
-            target = c_obj or l_obj
+            target = c_named or l_named
             if target is not None:
+                eff_dist = min(target.distance_m, zones[target.corridor].min_distance_m)
                 where = "ahead" if target.corridor == "center" else "on left"
-                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step right."
+                spoken = f"{target.label.capitalize()} {where} ({eff_dist:.1f}m). Step right."
             elif spoken == "Path clear." or curb_suppressed:
                 spoken = "Obstacle on left. Step right."
         elif steering == "CLEAR":

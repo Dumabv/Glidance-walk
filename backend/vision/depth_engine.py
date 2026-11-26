@@ -264,6 +264,12 @@ class DepthEngine:
                     else ("large" if self.device == "cuda-rtx" else ("base" if has_gpu else "small"))
                 )
                 fname, url, display_name, tier_max_w = ONNX_MODELS[tier]
+                # Int8 quantized Small-Q8 causes 237 CPU<->GPU Memcpy ops on CUDAExecutionProvider (slower than CPU!).
+                # Keep Q8 models strictly on CPUExecutionProvider for fast ~25ms inference.
+                if "quantized" in fname or "q8" in fname:
+                    providers = ["CPUExecutionProvider"]
+                    self.device = "cpu-ort"
+                    has_gpu = False
                 onnx_path = CACHE_DIR / fname
                 if not onnx_path.exists():
                     urllib.request.urlretrieve(url, str(onnx_path))
