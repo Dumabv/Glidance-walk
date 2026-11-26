@@ -258,6 +258,7 @@ class GroundAwareHazardDetector:
         self._yolo_alert_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._yolo_danger_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._last_steer: SteeringAction = "CLEAR"
+        self._flat_wall_streak: int = 0
 
     @staticmethod
     def _to_c_config(cfg: CalibrationConfig) -> _CCalibrationConfig:
@@ -285,6 +286,7 @@ class GroundAwareHazardDetector:
             self._yolo_alert_streak = {"left": 0, "center": 0, "right": 0}
             self._yolo_danger_streak = {"left": 0, "center": 0, "right": 0}
             self._last_steer = "CLEAR"
+            self._flat_wall_streak = 0
 
     def fuse_objects(
         self,
@@ -1211,14 +1213,34 @@ def fuse_close_range_metric_depth(
 def detect_close_flat_wall_or_door(
     rgb: np.ndarray,
     haz: HazardResult,
+    *,
+    pitch_deg: float = 0.0,
+    is_metric_depth: bool = False,
+    detector: GroundAwareHazardDetector | None = None,
+    stateful: bool = False,
 ) -> tuple[HazardResult, DetectedObject | None]:
     """Detects a close smooth wall or door filling the camera (<1.0m) via high-frequency edge depletion.
 
-    Relative depth models can assign 0 closeness to a flat white door when a door frame edge is nearby,
-    leaving center at ~4.9m. Measuring Canny edge density & Laplacian variance in the center 60% crop
-    separates close flat doors/walls (`edge_ratio < 0.045`, `lap_var < 65`) from normal rooms/streets by >10x.
+    Guarded by:
+      1. IMU pitch gate: ignored when pointing at floor (`0 < pitch < 55`) or ceiling (`pitch > 112`).
+      2. Metric depth gate: ignored when metric depth confirms open space (`center > 1.8m`).
+      3. Temporal debounce (`confirm_frames >= 2` in stateful mode) so single-frame hand motion blur
+         never triggers a false `STOP`.
     """
     if haz.lens_blocked or rgb is None or rgb.size == 0:
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
+        return haz, None
+
+    has_live_imu = bool(np.isfinite(pitch_deg) and abs(pitch_deg) > 1.0)
+    if has_live_imu and (pitch_deg < 55.0 or pitch_deg > 112.0):
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
+        return haz, None
+
+    if is_metric_depth and haz.center.min_distance_m > 1.8:
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
         return haz, None
 
     import cv2
@@ -1228,6 +1250,8 @@ def detect_close_flat_wall_or_door(
     center = gray[36:144, 48:192]
     luma_mean = float(np.mean(center))
     if luma_mean < 15.0:
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
         return haz, None
 
     edges = cv2.Canny(center, 40, 120)
@@ -1235,6 +1259,11 @@ def detect_close_flat_wall_or_door(
     lap_var = float(cv2.Laplacian(center, cv2.CV_32F).var())
 
     if edge_ratio < 0.045 and lap_var < 65.0:
+        if stateful and detector is not None:
+            detector._flat_wall_streak += 1
+            confirm_n = max(2, int(detector.config.confirm_frames))
+            if detector._flat_wall_streak < confirm_n:
+                return haz, None
         # Smoothness/defocus proxy for approximate distance (0.35m..0.90m)
         est_dist_m = round(0.35 + min(1.0, lap_var / 65.0) * 0.55, 2)
         eff_dist = min(est_dist_m, haz.center.min_distance_m)
@@ -1262,4 +1291,6 @@ def detect_close_flat_wall_or_door(
         )
         return updated, wall_obj
 
+    if detector is not None and stateful:
+        detector._flat_wall_streak = 0
     return haz, None

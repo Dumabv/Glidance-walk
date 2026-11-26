@@ -390,7 +390,14 @@ def _process_frame_critical_path(
         detected_objects = []
         yolo_ms = 0.0
 
-    haz, close_wall_obj = detect_close_flat_wall_or_door(dec.rgb, haz)
+    haz, close_wall_obj = detect_close_flat_wall_or_door(
+        dec.rgb,
+        haz,
+        pitch_deg=pitch_deg,
+        is_metric_depth=engine._is_metric_model and not engine.use_mock,
+        detector=detector,
+        stateful=True,
+    )
     if close_wall_obj is not None and not any(o.label in ("wall", "door") for o in detected_objects):
         detected_objects.insert(0, close_wall_obj)
 

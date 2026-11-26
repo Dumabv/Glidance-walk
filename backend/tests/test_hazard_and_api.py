@@ -463,3 +463,41 @@ def test_yolo_world_stairs_and_step_escalation() -> None:
     assert fused.steering == "CURB_DROP"
     assert "Stairs" in fused.spoken_cue
     assert "1.4m" in fused.spoken_cue
+
+
+def test_close_flat_wall_detector_guards_pitch_metric_and_2frame_debounce() -> None:
+    """PR #19 review guard: flat-wall detector must ignore floor/ceiling tilts, open metric depth, and 1-frame blur."""
+    from backend.vision.hazard_detector import detect_close_flat_wall_or_door
+
+    cfg = CalibrationConfig(confirm_frames=2)
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+    blank_door_rgb = np.full((240, 320, 3), 185, dtype=np.uint8)
+
+    # 1. Floor tilt (pitch=35 deg) -> ignored
+    h_floor, o_floor = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=35.0, detector=det, stateful=True
+    )
+    assert h_floor.steering == "CLEAR" and o_floor is None
+
+    # 2. Metric depth confirms open space (> 1.8m) -> ignored
+    h_metric, o_metric = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=78.0, is_metric_depth=True, detector=det, stateful=True
+    )
+    assert h_metric.steering == "CLEAR" and o_metric is None
+
+    # 3. Normal tilt (78 deg), relative depth: 1st frame debounced (motion blur guard), 2nd frame triggers STOP
+    det.reset()
+    h1, o1 = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=78.0, is_metric_depth=False, detector=det, stateful=True
+    )
+    assert h1.steering == "CLEAR" and o1 is None
+    h2, o2 = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=78.0, is_metric_depth=False, detector=det, stateful=True
+    )
+    assert h2.steering == "STOP" and h2.wall_override is True and o2 is not None and o2.label == "wall"
