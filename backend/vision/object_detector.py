@@ -11,7 +11,7 @@ from PIL import Image
 
 from backend.schemas import Corridor, DetectedObject, Severity
 
-# Walkable indoor & sidewalk obstacle classes from COCO (ignores wall clocks, ceiling lights, etc.)
+# Walkable indoor & sidewalk obstacle classes from COCO (ignores wall/tabletop clutter like laptops, bottles, TVs)
 WALKING_OBSTACLE_CLASSES = {
     "person",
     "bicycle",
@@ -29,15 +29,11 @@ WALKING_OBSTACLE_CLASSES = {
     "umbrella",
     "handbag",
     "suitcase",
-    "bottle",
     "chair",
     "couch",
     "potted plant",
     "bed",
     "dining table",
-    "toilet",
-    "tv",
-    "laptop",
     "refrigerator",
 }
 

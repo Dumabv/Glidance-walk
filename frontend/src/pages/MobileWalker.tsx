@@ -27,7 +27,11 @@ import {
   switchCameraStream,
   type CameraFacingMode,
 } from '../services/camera';
-import { HapticsEngine, type HapticPulseEvent } from '../services/haptics';
+import {
+  evaluateForwardBlock,
+  HapticsEngine,
+  type HapticPulseEvent,
+} from '../services/haptics';
 import {
   SpatialAudioEngine,
   type GuidanceProfile,
@@ -152,8 +156,9 @@ export function MobileWalker() {
 
   const [hapticsOn, setHapticsOn] = useState(true);
   const [sonarOn, setSonarOn] = useState(true);
-  const [voiceOn, setVoiceOn] = useState(true);
-  const [guidanceProfile, setGuidanceProfile] = useState<GuidanceProfile>('smart_calm');
+  const [voiceOn, setVoiceOn] = useState(false);
+  const [guidanceProfile, setGuidanceProfile] = useState<GuidanceProfile>('metal_detector');
+  const guidanceProfileRef = useRef<GuidanceProfile>('metal_detector');
   const [voiceLang, setVoiceLang] = useState<VoiceLang>('en');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
@@ -210,8 +215,12 @@ export function MobileWalker() {
   }, [voiceOn]);
 
   useEffect(() => {
+    guidanceProfileRef.current = guidanceProfile;
+    const isMetal =
+      guidanceProfile === 'metal_detector' || guidanceProfile === 'tactile_only';
     audioRef.current?.setProfile(guidanceProfile);
-    hapticsRef.current?.setCalmBackoff(guidanceProfile !== 'sonar_3d');
+    hapticsRef.current?.setMetalDetectorMode(isMetal);
+    hapticsRef.current?.setCalmBackoff(guidanceProfile === 'smart_calm');
   }, [guidanceProfile]);
 
   useEffect(() => {
@@ -223,9 +232,14 @@ export function MobileWalker() {
     lastValidFrameAtRef.current = performance.now();
     setSignalLost(false);
 
-    // Fuse narrow 62° frame into 360° rolling Spatial Memory (24 KB RAM, ~0.03ms CPU)
+    // Update 360° rolling Spatial Memory for BirdEyeRadar visualization;
+    // in Metal Detector / Silent Vibro mode, bypass memory suppression & 11s blind-spot
+    // vetoes so sweeping the phone radially around the body reacts in 1 frame with 0 ghosts!
     const memOut = memoryRef.current?.integrateAndFuse(raw);
-    let data = memOut ? memOut.fused : raw;
+    const activeProfile = guidanceProfileRef.current;
+    const isLiveMetalSweep =
+      activeProfile === 'metal_detector' || activeProfile === 'tactile_only';
+    let data = isLiveMetalSweep ? raw : memOut ? memOut.fused : raw;
 
     // Multimodal Sensor Fusion: Camera Depth + 20kHz Ultrasonic Bat-Sonar -> GLASS & WHITE-WALL SHIELD!
     const ultra = batReadingRef.current;
@@ -387,6 +401,7 @@ export function MobileWalker() {
   const stopSession = useCallback(() => {
     sessionIdRef.current += 1;
     sessionActiveRef.current = false;
+    hapticsRef.current?.resetSessionState();
     cancelFrameLoop();
     if (watchdogRef.current !== null) {
       window.clearInterval(watchdogRef.current);
@@ -859,6 +874,11 @@ export function MobileWalker() {
     window.setTimeout(() => setCaptureNotice(null), 2600);
   };
 
+  const isMetalSweepProfile =
+    guidanceProfile === 'metal_detector' || guidanceProfile === 'tactile_only';
+  const forwardBlock =
+    streaming && !signalLost && guidance ? evaluateForwardBlock(guidance) : null;
+
   // Fail-closed visual banner state (never defaults to green `PATH CLEAR` before first frame!)
   const bannerStateKey: keyof typeof STEERING_META = !streaming
     ? 'READY'
@@ -867,7 +887,23 @@ export function MobileWalker() {
       : guidance
         ? guidance.steering
         : 'READY';
-  const meta = STEERING_META[bannerStateKey];
+  const meta =
+    isMetalSweepProfile && forwardBlock
+      ? forwardBlock.blocked
+        ? {
+            title:
+              forwardBlock.kind === 'curb'
+                ? 'STOP — STEP / CURB'
+                : `STOP — OBSTACLE ${forwardBlock.distanceM.toFixed(1)}m`,
+            bg: 'bg-red-950/95 text-red-100',
+            border: 'border-red-500',
+          }
+        : {
+            title: 'OPEN PATH — GO',
+            bg: 'bg-emerald-950/85 text-emerald-200',
+            border: 'border-emerald-500/70',
+          }
+      : STEERING_META[bannerStateKey];
   const nativeVib = hapticsRef.current.isNativeVibrationSupported();
   const cameraLabel = getCameraLabel(facingMode);
   const nextCameraLabel = getCameraLabel(getOppositeFacingMode(facingMode));
@@ -966,7 +1002,11 @@ export function MobileWalker() {
         <span className="mt-1 block text-sm opacity-90">
           {signalLost
             ? 'Connection or camera interrupted — stop walking.'
-            : guidance?.spoken_cue ?? 'Tap Start Walking Stream to engage rear camera.'}
+            : isMetalSweepProfile && forwardBlock
+              ? forwardBlock.blocked
+                ? `Obstacle directly ahead (${forwardBlock.distanceM.toFixed(1)}m) — sweep phone to find silence.`
+                : 'No blocking obstacle ahead — silent & clear to walk.'
+              : guidance?.spoken_cue ?? 'Tap Start Walking Stream to engage rear camera.'}
         </span>
         {!signalLost && guidance?.objects && guidance.objects.length > 0 && (
           <span className="mt-2 flex flex-wrap justify-center gap-1.5">
@@ -1056,9 +1096,9 @@ export function MobileWalker() {
       >
         {(
           [
-            { id: 'smart_calm', label: 'Smart Calm' },
-            { id: 'sonar_3d', label: '3D Radar' },
+            { id: 'metal_detector', label: 'Metal Detector' },
             { id: 'tactile_only', label: 'Silent Vibro' },
+            { id: 'smart_calm', label: 'Smart Calm' },
           ] as const
         ).map((p) => (
           <button

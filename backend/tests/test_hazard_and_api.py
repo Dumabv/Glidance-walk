@@ -304,3 +304,123 @@ def test_benchmark_runner_applies_yolo_fusion_on_real_samples(tmp_path) -> None:
     assert report.samples[0].smart_correct is True
     assert report.samples[0].smart_severity == "danger"
     assert report.samples[0].smart_ms >= 7.5
+
+
+def test_metric_depth_close_wall_computes_real_spread_and_triggers_stop() -> None:
+    """Close blank walls on metric depth models must compute low spread_milli and trigger STOP."""
+    from backend.vision.depth_engine import DepthEngine
+
+    eng = DepthEngine(use_mock=True)
+    assert eng._is_metric_model is True
+
+    close_wall_m = np.full((140, 182), 0.72, dtype=np.float32)
+    closeness, spread_milli = eng._normalize_depth_fast(close_wall_m)
+    assert spread_milli <= 20
+    assert float(np.median(closeness)) >= 0.60
+
+    det = GroundAwareHazardDetector(CalibrationConfig())
+    res = det.analyze(
+        closeness,
+        stateful=False,
+        raw_spread_milli=spread_milli,
+        luma_mean=185.0,
+        luma_std=6.0,
+    )
+    assert res.overall_severity == "danger"
+    assert res.steering == "STOP"
+    assert res.wall_override is True
+
+
+def test_close_range_metric_fusion_escalates_near_desk_and_ignores_open_aisle() -> None:
+    """Close center obstacle (0.85m) escalates to danger; open aisle (3.2m) stays clear."""
+    from backend.vision.hazard_detector import fuse_close_range_metric_depth
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+    assert base_haz.steering == "CLEAR"
+
+    # 1. Open classroom aisle at 3.2m -> remains CLEAR
+    open_depth = np.full((180, 240), 3.2, dtype=np.float32)
+    open_fused = fuse_close_range_metric_depth(base_haz, open_depth, pitch_deg=78.0, config=cfg)
+    assert open_fused.steering == "CLEAR"
+    assert open_fused.center.severity == "clear"
+
+    # 2. Desk / chair directly ahead in center at 0.85m -> escalates center to danger
+    desk_depth = np.full((180, 240), 3.2, dtype=np.float32)
+    desk_depth[45:115, 80:160] = 0.85
+    desk_fused = fuse_close_range_metric_depth(base_haz, desk_depth, pitch_deg=78.0, config=cfg)
+    assert desk_fused.center.severity == "danger"
+    assert desk_fused.center.min_distance_m <= 0.90
+    assert desk_fused.overall_severity == "danger"
+
+    # 3. Steep downward tilt at shoes (pitch = 35°) -> ignored so shoes/floor don't false-alarm
+    shoe_fused = fuse_close_range_metric_depth(base_haz, desk_depth, pitch_deg=35.0, config=cfg)
+    assert shoe_fused.steering == "CLEAR"
+
+
+def test_classroom_video_regression_fixes() -> None:
+    """Regressions found on real classroom video IMG_7723.MOV:
+    1. Narrow-gap STOP (left+right person, empty center) must never say 'Path clear.'
+    2. Foreground chair/person overlapping a curb must suppress false CURB_DROP.
+    3. Stateful `fuse_objects` must debounce 1-frame YOLO danger spikes.
+    """
+    from backend.evaluation.video_diagnostics import diagnose_video_run
+    from backend.vision.hazard_detector import fuse_yolo_with_verified_hazard
+
+    cfg = CalibrationConfig(confirm_frames=2)
+    det = GroundAwareHazardDetector(cfg)
+    scenes = {s.sample_id: s for s in build_synthetic_calibration_suite()}
+
+    # 1. Narrow gap STOP must update spoken_cue (never leave 'Path clear.')
+    clear_haz = det.analyze(scenes["syn-clear-1"].closeness_map, stateful=False)
+    left_p = DetectedObject(
+        label="person", confidence=0.88, distance_m=1.05, corridor="left",
+        bbox_norm=[0.02, 0.20, 0.32, 0.90], severity="danger",
+    )
+    right_p = DetectedObject(
+        label="person", confidence=0.89, distance_m=1.08, corridor="right",
+        bbox_norm=[0.68, 0.20, 0.98, 0.90], severity="danger",
+    )
+    gap_res = fuse_yolo_with_verified_hazard(clear_haz, [left_p, right_p], cfg)
+    assert gap_res.steering == "STOP"
+    assert "path clear" not in gap_res.spoken_cue.lower()
+    assert "Narrow gap" in gap_res.spoken_cue
+
+    # 2. Foreground chair/person suppresses false CURB_DROP
+    curb_haz = det.analyze(scenes["syn-curb-1"].closeness_map, stateful=False)
+    assert curb_haz.curb.detected is True
+    fg_chair = DetectedObject(
+        label="chair", confidence=0.85, distance_m=1.55, corridor="right",
+        bbox_norm=[0.50, 0.25, 0.95, 0.85], severity="caution",
+    )
+    suppressed = fuse_yolo_with_verified_hazard(curb_haz, [fg_chair], cfg)
+    assert suppressed.curb.detected is False
+    assert suppressed.steering != "CURB_DROP"
+
+    # 3. Stateful YOLO debounce prevents single-frame danger flicker
+    det.reset()
+    f1 = det.fuse_objects(clear_haz, [left_p], stateful=True)
+    f2 = det.fuse_objects(clear_haz, [left_p], stateful=True)
+    assert f1.left.severity == "caution"
+    assert f2.left.severity == "danger"
+
+    # 4. Self-diagnostic advisor flags cue contradiction automatically
+    diag = diagnose_video_run(
+        {
+            "p95_ms": 22.0,
+            "kernel_backend": "rust-simd",
+            "severity_counts": {"danger": 1},
+            "alert_segments": [{"start_sec": 1.0, "end_sec": 1.0, "frames": 1}],
+            "timeline": [
+                {"time_sec": 1.0, "steering": "STOP", "spoken_cue": "Path clear.", "objects": []}
+            ],
+        }
+    )
+    codes = {item["code"] for item in diag["findings"]}
+    assert "CUE_CONTRADICTION" in codes

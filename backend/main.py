@@ -33,6 +33,7 @@ from backend.schemas import (
 from backend.vision.depth_engine import DepthEngine, render_depth_overlay_jpeg
 from backend.vision.hazard_detector import (
     GroundAwareHazardDetector,
+    fuse_close_range_metric_depth,
     fuse_yolo_with_verified_hazard,
 )
 from backend.vision.object_detector import SemanticObjectDetector
@@ -349,12 +350,15 @@ def _process_frame_critical_path(
         frame_fresh=True,
     )
     depth_m = pred.depth_meters
+    if engine._is_metric_model and not engine.use_mock and depth_m is not None:
+        haz = fuse_close_range_metric_depth(haz, depth_m, pitch_deg, detector.config)
     if obj_detector.is_active and depth_m is not None:
         obj_res = obj_detector.detect(dec.rgb, depth_m)
-        haz = fuse_yolo_with_verified_hazard(haz, obj_res.objects, detector.config)
+        haz = detector.fuse_objects(haz, obj_res.objects, stateful=True)
         detected_objects = obj_res.objects
         yolo_ms = obj_res.yolo_ms
     else:
+        haz = detector.fuse_objects(haz, [], stateful=True)
         detected_objects = []
         yolo_ms = 0.0
 

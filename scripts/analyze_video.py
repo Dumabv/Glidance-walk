@@ -28,12 +28,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from backend.evaluation.video_diagnostics import diagnose_video_run
 from backend.schemas import CalibrationConfig, GuidancePayload, LatencyBreakdown
 from backend.vision.depth_engine import DepthEngine, render_depth_overlay_jpeg
-from backend.vision.hazard_detector import (
-    GroundAwareHazardDetector,
-    fuse_yolo_with_verified_hazard,
-)
+from backend.vision.hazard_detector import GroundAwareHazardDetector
 from backend.vision.object_detector import SemanticObjectDetector
 
 
@@ -144,9 +142,11 @@ def analyze_video(
             yolo_ms = 0.0
             if obj_detector.is_active and pred.depth_meters is not None:
                 obj_res = obj_detector.detect(rgb, pred.depth_meters)
-                haz = fuse_yolo_with_verified_hazard(haz, obj_res.objects, config)
+                haz = hazard_detector.fuse_objects(haz, obj_res.objects, stateful=True)
                 detected_objects = obj_res.objects
                 yolo_ms = obj_res.yolo_ms
+            else:
+                haz = hazard_detector.fuse_objects(haz, [], stateful=True)
 
             total_ms = (time.perf_counter() - t0) * 1000.0
             latencies_ms.append(total_ms)
@@ -299,6 +299,8 @@ def analyze_video(
         "alert_segments": segments,
         "timeline": timeline,
     }
+    diagnostics = diagnose_video_run(summary)
+    summary["diagnostics"] = diagnostics
 
     print("\n================ GLIDANCE VIDEO REPORT ================")
     print(f"Processed : {processed} frames in {wall_sec:.1f}s (P50={p50:.1f}ms, P95={p95:.1f}ms)")
@@ -306,6 +308,17 @@ def analyze_video(
     print(f"Severity  : {dict(severity_counts)}")
     if object_counts:
         print(f"Top YOLO  : {dict(object_counts.most_common(8))}")
+
+    print(f"\n=========== SELF-DIAGNOSTICS (Score: {diagnostics['health_score']}/100) ===========")
+    for item in diagnostics["findings"]:
+        ts_str = (
+            f" | t={', '.join(_format_ts(t) for t in item['timestamps'][:5])}"
+            if item["timestamps"]
+            else ""
+        )
+        print(f"  [{item['severity']:<8}] {item['title']} ({item['evidence']}{ts_str})")
+        print(f"             -> Fix: {item['fix_hint']}")
+
     print(f"\nAlert Segments ({len(segments)} total):")
     for seg in segments[:25]:
         print(
