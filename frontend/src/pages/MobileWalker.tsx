@@ -6,6 +6,8 @@ import {
   ChevronUp,
   Film,
   Lock,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
   Radio,
@@ -161,6 +163,7 @@ export function MobileWalker() {
   const guidanceProfileRef = useRef<GuidanceProfile>('metal_detector');
   const [voiceLang, setVoiceLang] = useState<VoiceLang>('en');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
@@ -222,6 +225,39 @@ export function MobileWalker() {
     hapticsRef.current?.setMetalDetectorMode(isMetal);
     hapticsRef.current?.setCalmBackoff(guidanceProfile === 'smart_calm');
   }, [guidanceProfile]);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) {
+        setIsFullscreen(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    hapticsRef.current?.triggerTapFeedback();
+    if (isFullscreen) {
+      setIsFullscreen(false);
+      try {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        }
+      } catch {
+        // Ignore if browser exited fullscreen natively
+      }
+    } else {
+      setIsFullscreen(true);
+      try {
+        if (document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch {
+        // CSS fixed-inset fullscreen overlay still works cleanly on iOS/WebViews
+      }
+    }
+  }, [isFullscreen]);
 
   useEffect(() => {
     audioRef.current?.setVoiceLang(voiceLang);
@@ -1063,6 +1099,19 @@ export function MobileWalker() {
           <span>Camera: {cameraLabel}</span>
         </button>
 
+        <button
+          type="button"
+          onClick={() => void toggleFullscreen()}
+          className="flex items-center justify-center gap-1.5 rounded-2xl border border-sky-500/60 bg-sky-950/60 px-3.5 py-4 text-xs font-bold text-sky-100 hover:bg-sky-900/70"
+        >
+          {isFullscreen ? (
+            <Minimize2 className="h-5 w-5" aria-hidden="true" />
+          ) : (
+            <Maximize2 className="h-5 w-5" aria-hidden="true" />
+          )}
+          <span>{isFullscreen ? 'Exit Full' : 'Fullscreen'}</span>
+        </button>
+
         {streaming && (
           <button
             type="button"
@@ -1345,9 +1394,15 @@ export function MobileWalker() {
         </div>
       )}
 
-      {/* Live Camera Preview (Aspect-Ratio Faithful!) & Radar */}
+      {/* Live Camera Preview (Aspect-Ratio Faithful + True Fullscreen HUD!) & Radar */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+        <div
+          className={
+            isFullscreen
+              ? 'fixed inset-0 z-50 flex flex-col bg-black'
+              : 'relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900'
+          }
+        >
           <video
             ref={videoRef}
             autoPlay
@@ -1377,18 +1432,102 @@ export function MobileWalker() {
                 setVideoPaused(true);
               }
             }}
-            className={`w-full bg-black object-contain ${
-              videoAspect === 'portrait' ? 'aspect-[3/4] max-h-72' : 'aspect-[4/3]'
-            }`}
+            className={
+              isFullscreen
+                ? 'h-full w-full bg-black object-cover'
+                : `w-full bg-black object-contain ${
+                    videoAspect === 'portrait' ? 'aspect-[3/4] max-h-72' : 'aspect-[4/3]'
+                  }`
+            }
           />
+          {!isFullscreen && (
+            <button
+              type="button"
+              onClick={() => void toggleFullscreen()}
+              aria-label="Open fullscreen camera"
+              className="absolute right-2 top-2 rounded-lg border border-slate-600/70 bg-slate-950/75 p-2 text-slate-100 backdrop-blur hover:bg-slate-800"
+            >
+              <Maximize2 className="h-4 w-4" aria-hidden="true" />
+            </button>
+          )}
+          {isFullscreen && (
+            <>
+              {/* Top HUD: detected objects, approx distance, FPS/RTT & Exit */}
+              <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/80 via-black/45 to-transparent p-4">
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-slate-950/85 px-3 py-1 text-xs font-bold text-sky-300 backdrop-blur">
+                      {fps} FPS · {rttMs} ms
+                    </span>
+                    {guidance && (
+                      <span className="rounded-full bg-slate-950/85 px-3 py-1 text-sm font-black text-white backdrop-blur">
+                        ~{Math.min(guidance.left.min_distance_m, guidance.center.min_distance_m, guidance.right.min_distance_m).toFixed(1)} m
+                      </span>
+                    )}
+                  </div>
+                  {guidance?.objects && guidance.objects.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {guidance.objects.slice(0, 3).map((obj, idx) => (
+                        <span
+                          key={`fs-${obj.label}-${idx}`}
+                          className="rounded-full border border-white/25 bg-black/75 px-3 py-1 text-xs font-extrabold uppercase tracking-wide text-amber-200 backdrop-blur"
+                        >
+                          {obj.label} · ~{obj.distance_m.toFixed(1)}m
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void toggleFullscreen()}
+                  className="pointer-events-auto flex items-center gap-1.5 rounded-xl border border-white/30 bg-black/75 px-3.5 py-2 text-xs font-bold text-white backdrop-blur hover:bg-slate-800"
+                >
+                  <Minimize2 className="h-4 w-4" aria-hidden="true" />
+                  Exit
+                </button>
+              </div>
+
+              {/* Bottom HUD: big steering banner + L/C/R distances */}
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-4 pb-6">
+                <div className={`rounded-2xl border-2 px-4 py-3 text-center backdrop-blur ${meta.bg} ${meta.border}`}>
+                  <div className="text-2xl font-black tracking-tight">{meta.title}</div>
+                  <div className="mt-0.5 text-sm font-semibold opacity-95">
+                    {guidance?.spoken_cue ?? 'Scanning...'}
+                  </div>
+                </div>
+                {guidance && (
+                  <div className="grid grid-cols-3 gap-2 text-center text-xs font-bold">
+                    {(['left', 'center', 'right'] as const).map((side) => {
+                      const z = guidance[side];
+                      const tone =
+                        z.severity === 'danger'
+                          ? 'border-red-500/80 bg-red-950/85 text-red-100'
+                          : z.severity === 'caution'
+                            ? 'border-amber-400/80 bg-amber-950/85 text-amber-100'
+                            : 'border-emerald-500/60 bg-emerald-950/75 text-emerald-100';
+                      return (
+                        <div key={side} className={`rounded-xl border px-2 py-1.5 backdrop-blur ${tone}`}>
+                          <div className="text-[10px] uppercase opacity-75">{side}</div>
+                          <div className="text-sm font-black">~{z.min_distance_m.toFixed(1)}m</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
           <canvas ref={canvasRef} className="hidden" />
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
-            <span className="truncate">
-              {videoFileName ? `Video: ${videoFileName}` : `Lens: ${cameraDeviceLabel ?? cameraLabel}`}
-            </span>
-            <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
-            <span>RTT: {rttMs} ms</span>
-          </div>
+          {!isFullscreen && (
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
+              <span className="truncate">
+                {videoFileName ? `Video: ${videoFileName}` : `Lens: ${cameraDeviceLabel ?? cameraLabel}`}
+              </span>
+              <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
+              <span>RTT: {rttMs} ms</span>
+            </div>
+          )}
           {videoFileName && (
             <div className="flex flex-col gap-2 border-t border-slate-800 bg-slate-950/80 px-3 py-2.5 text-xs">
               <div className="flex items-center gap-2">

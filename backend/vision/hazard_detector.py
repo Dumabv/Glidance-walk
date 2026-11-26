@@ -1100,8 +1100,6 @@ def fuse_close_range_metric_depth(
         center=center_z,
         right=right_z,
     )
-
-
 METRIC_CLOSE_DANGER_M = 1.05
 METRIC_CLOSE_CAUTION_M = 1.45
 
@@ -1208,3 +1206,60 @@ def fuse_close_range_metric_depth(
         center=center_z,
         right=right_z,
     )
+
+
+def detect_close_flat_wall_or_door(
+    rgb: np.ndarray,
+    haz: HazardResult,
+) -> tuple[HazardResult, DetectedObject | None]:
+    """Detects a close smooth wall or door filling the camera (<1.0m) via high-frequency edge depletion.
+
+    Relative depth models can assign 0 closeness to a flat white door when a door frame edge is nearby,
+    leaving center at ~4.9m. Measuring Canny edge density & Laplacian variance in the center 60% crop
+    separates close flat doors/walls (`edge_ratio < 0.045`, `lap_var < 65`) from normal rooms/streets by >10x.
+    """
+    if haz.lens_blocked or rgb is None or rgb.size == 0:
+        return haz, None
+
+    import cv2
+
+    small = cv2.resize(rgb, (240, 180), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+    center = gray[36:144, 48:192]
+    luma_mean = float(np.mean(center))
+    if luma_mean < 15.0:
+        return haz, None
+
+    edges = cv2.Canny(center, 40, 120)
+    edge_ratio = float(np.mean(edges > 0))
+    lap_var = float(cv2.Laplacian(center, cv2.CV_32F).var())
+
+    if edge_ratio < 0.045 and lap_var < 65.0:
+        # Smoothness/defocus proxy for approximate distance (0.35m..0.90m)
+        est_dist_m = round(0.35 + min(1.0, lap_var / 65.0) * 0.55, 2)
+        eff_dist = min(est_dist_m, haz.center.min_distance_m)
+        wall_obj = DetectedObject(
+            label="wall",
+            confidence=0.92,
+            distance_m=round(eff_dist, 2),
+            corridor="center",
+            bbox_norm=[0.08, 0.08, 0.92, 0.92],
+            severity="danger",
+        )
+        new_center = ZoneMetrics(
+            severity="danger",
+            obstacle_score=max(haz.center.obstacle_score, 0.92),
+            min_distance_m=round(eff_dist, 2),
+            coverage_ratio=max(haz.center.coverage_ratio, 0.85),
+        )
+        updated = replace(
+            haz,
+            overall_severity="danger",
+            steering="STOP",
+            wall_override=True,
+            center=new_center,
+            spoken_cue=f"Wall or door ahead (~{eff_dist:.1f}m). Stop.",
+        )
+        return updated, wall_obj
+
+    return haz, None

@@ -33,6 +33,7 @@ from backend.schemas import (
 from backend.vision.depth_engine import DepthEngine, render_depth_overlay_jpeg
 from backend.vision.hazard_detector import (
     GroundAwareHazardDetector,
+    detect_close_flat_wall_or_door,
     fuse_close_range_metric_depth,
     fuse_yolo_with_verified_hazard,
 )
@@ -355,12 +356,16 @@ def _process_frame_critical_path(
     if obj_detector.is_active and depth_m is not None:
         obj_res = obj_detector.detect(dec.rgb, depth_m)
         haz = detector.fuse_objects(haz, obj_res.objects, stateful=True)
-        detected_objects = obj_res.objects
+        detected_objects = list(obj_res.objects)
         yolo_ms = obj_res.yolo_ms
     else:
         haz = detector.fuse_objects(haz, [], stateful=True)
         detected_objects = []
         yolo_ms = 0.0
+
+    haz, close_wall_obj = detect_close_flat_wall_or_door(dec.rgb, haz)
+    if close_wall_obj is not None and not any(o.label in ("wall", "door") for o in detected_objects):
+        detected_objects.insert(0, close_wall_obj)
 
     server_total_ms = (time.perf_counter() - t_total) * 1000.0
 

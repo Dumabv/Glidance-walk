@@ -386,10 +386,12 @@ class SemanticObjectDetector:
             if out_general is not None
             else None
         )
-        detections = self._decode_yolo_output(
+        # Use 0.30 floor when decoding primary head so doors/walls are caught, then enforce strict 0.50 on stairs
+        decode_floor = min(self.conf_threshold, 0.30)
+        raw_primary = self._decode_yolo_output(
             out_primary,
             self._ort_names,
-            self.conf_threshold,
+            decode_floor,
             scale,
             pad_x,
             pad_y,
@@ -398,6 +400,11 @@ class SemanticObjectDetector:
             depth_meters,
             allowed_labels=primary_allowed,
         )
+        detections = [
+            d
+            for d in raw_primary
+            if (d.confidence >= self.conf_threshold if d.label in STAIRS_CURB_LABELS else d.confidence >= 0.32)
+        ]
         if out_general is not None:
             general_dets = self._decode_yolo_output(
                 out_general,
