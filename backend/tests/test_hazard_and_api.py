@@ -196,6 +196,21 @@ def test_fastapi_endpoints_and_8byte_and_16byte_websocket_protocols(tmp_path) ->
                 ws.send_bytes(payload16)
                 reply2 = ws.receive_json()
                 assert reply2["pitch_deg"] == 68.5
+
+                # 3. Single-Walker Session Lock: a 2nd phone connecting while 1st is active is rejected!
+                with client.websocket_connect("/ws/phone") as ws2:
+                    lock_msg = ws2.receive_json()
+                    assert lock_msg["code"] == "SESSION_LOCKED"
+
+            # 4. Once 1st walker disconnects, lock is released and next walker can connect
+            net = client.get(
+                "/api/network-info",
+                headers={"Origin": "https://glidance-demo.trycloudflare.com"},
+            ).json()
+            assert net["session_locked"] is False
+            assert net["public_origin"] == "https://glidance-demo.trycloudflare.com"
+            assert net["mobile_url"] == "https://glidance-demo.trycloudflare.com/?mode=mobile"
+            assert len(net["candidates"]) >= 1
     finally:
         state.dataset_store = orig_store
 

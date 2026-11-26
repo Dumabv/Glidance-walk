@@ -5,6 +5,7 @@ import {
   Box,
   Cpu,
   Gauge,
+  Lock,
   Maximize2,
   Minimize2,
   Play,
@@ -27,6 +28,7 @@ import type {
   DashboardMessage,
   DemoSceneSummary,
   GuidancePayload,
+  NetworkCandidate,
   NetworkInfo,
   Severity,
 } from '../types/telemetry';
@@ -37,9 +39,30 @@ const SEVERITY_BADGE: Record<Severity, string> = {
   danger: 'bg-red-500/25 text-red-200 border-red-500/60',
 };
 
+const LOOPBACK_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  '[::1]',
+  '0.0.0.0',
+]);
+
 function getInitialStageMode(): boolean {
   if (typeof window === 'undefined') return false;
   return new URLSearchParams(window.location.search).get('stage') === '1';
+}
+
+function getBrowserOriginMobileUrl(): { url: string; isDomain: boolean } | null {
+  if (typeof window === 'undefined') return null;
+  const { hostname, origin } = window.location;
+  if (!hostname || LOOPBACK_HOSTS.has(hostname.toLowerCase())) {
+    return null;
+  }
+  const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+  return {
+    url: `${origin}/?mode=mobile`,
+    isDomain: !isIpv4,
+  };
 }
 
 export function MissionControl() {
@@ -49,6 +72,7 @@ export function MissionControl() {
   const [depthB64, setDepthB64] = useState<string | null>(null);
   const [simulatedNote, setSimulatedNote] = useState<string | null>(null);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
+  const [selectedMobileUrl, setSelectedMobileUrl] = useState<string | null>(null);
   const [demoScenes, setDemoScenes] = useState<DemoSceneSummary[]>([]);
   const [calibration, setCalibration] = useState<CalibrationConfig | null>(null);
   const [latencyHistory, setLatencyHistory] = useState<LatencySample[]>([]);
@@ -157,8 +181,15 @@ export function MissionControl() {
       ws.onmessage = (event) => {
         try {
           const msg: DashboardMessage = JSON.parse(event.data);
+          if (msg.type === 'network_info' && msg.network_info) {
+            setNetworkInfo(msg.network_info);
+            return;
+          }
           if (typeof msg.phone_connected === 'boolean') {
             setPhoneConnected(msg.phone_connected);
+            if (msg.type === 'status' && !msg.phone_connected) {
+              setRawB64(null);
+            }
           }
           if (msg.guidance) {
             setGuidance(msg.guidance);
@@ -251,6 +282,43 @@ export function MissionControl() {
       : 0;
 
   const detectedCount = guidance?.objects?.length ?? 0;
+  const browserOriginMobile = getBrowserOriginMobileUrl();
+  const qrCandidates: NetworkCandidate[] = (() => {
+    const list: NetworkCandidate[] = [];
+    const seen = new Set<string>();
+    if (browserOriginMobile) {
+      seen.add(browserOriginMobile.url);
+      list.push({
+        label: browserOriginMobile.isDomain ? 'Tunnel / Domain' : 'Browser IP',
+        mobile_url: browserOriginMobile.url,
+        kind: browserOriginMobile.isDomain ? 'tunnel' : 'lan',
+      });
+    }
+    for (const c of networkInfo?.candidates ?? []) {
+      if (!seen.has(c.mobile_url)) {
+        seen.add(c.mobile_url);
+        list.push(c);
+      }
+    }
+    if (list.length === 0 && networkInfo?.mobile_url) {
+      list.push({
+        label: `LAN (${networkInfo.lan_ip})`,
+        mobile_url: networkInfo.mobile_url,
+        kind: 'lan',
+      });
+    }
+    return list;
+  })();
+
+  const activeCandidate =
+    qrCandidates.find((c) => c.mobile_url === selectedMobileUrl) ??
+    qrCandidates[0] ??
+    null;
+  const mobileQrUrl = activeCandidate?.mobile_url ?? networkInfo?.mobile_url ?? null;
+  const qrCaption =
+    activeCandidate?.kind === 'tunnel'
+      ? 'Scan on Phone (Any Network / 4G / Wi-Fi — Locked on Connect)'
+      : 'Scan on Phone (Same Wi-Fi / Hotspot — Locked on Connect)';
 
   if (stageMode) {
     return (
@@ -295,22 +363,50 @@ export function MissionControl() {
                 large
                 className="min-h-0 flex-1"
               />
+            ) : phoneConnected ? (
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-emerald-500/40 bg-emerald-950/20 p-6 text-center">
+                <Lock className="h-10 w-10 text-emerald-400" aria-hidden="true" />
+                <p className="text-base font-bold text-emerald-200">
+                  Live Walker Connected — Session Locked (1/1)
+                </p>
+                <p className="text-xs text-slate-300">
+                  QR code is hidden and external connections are blocked while a live walk is active.
+                </p>
+              </div>
             ) : (
-              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-700 bg-slate-950/75 p-4 text-center">
-                {networkInfo ? (
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-slate-700 bg-slate-950/75 p-4 text-center">
+                {mobileQrUrl ? (
                   <>
+                    {qrCandidates.length > 1 && (
+                      <div className="flex flex-wrap justify-center gap-1.5">
+                        {qrCandidates.map((cand) => (
+                          <button
+                            key={cand.mobile_url}
+                            type="button"
+                            onClick={() => setSelectedMobileUrl(cand.mobile_url)}
+                            className={`rounded-full border px-2.5 py-0.5 text-[11px] font-bold transition ${
+                              cand.mobile_url === mobileQrUrl
+                                ? 'border-sky-400 bg-sky-500/20 text-sky-200'
+                                : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {cand.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     <div className="rounded-2xl bg-white p-3.5 shadow-lg">
                       <QRCodeSVG
-                        value={networkInfo.mobile_url}
+                        value={mobileQrUrl}
                         size={180}
                         level="M"
                       />
                     </div>
                     <p className="text-sm font-medium text-slate-200">
-                      Scan on Phone (Same Wi-Fi / Hotspot)
+                      {qrCaption}
                     </p>
-                    <code className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-sky-300">
-                      {networkInfo.mobile_url}
+                    <code className="max-w-full break-all rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-sky-300">
+                      {mobileQrUrl}
                     </code>
                   </>
                 ) : (
@@ -614,22 +710,50 @@ export function MissionControl() {
               showBoxes={showBoxes}
               className="aspect-[4/3] w-full"
             />
+          ) : phoneConnected ? (
+            <div className="flex aspect-[4/3] flex-col items-center justify-center gap-2.5 rounded-xl border border-emerald-500/40 bg-emerald-950/20 p-4 text-center">
+              <Lock className="h-8 w-8 text-emerald-400" aria-hidden="true" />
+              <p className="text-sm font-bold text-emerald-200">
+                Live Walker Connected — Session Locked (1/1)
+              </p>
+              <p className="text-xs text-slate-300">
+                QR code is hidden and second connections are blocked during a live walk.
+              </p>
+            </div>
           ) : (
-            <div className="flex aspect-[4/3] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-700 bg-slate-950/70 p-4 text-center">
-              {networkInfo ? (
+            <div className="flex aspect-[4/3] flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-slate-700 bg-slate-950/70 p-4 text-center">
+              {mobileQrUrl ? (
                 <>
+                  {qrCandidates.length > 1 && (
+                    <div className="flex flex-wrap justify-center gap-1">
+                      {qrCandidates.map((cand) => (
+                        <button
+                          key={cand.mobile_url}
+                          type="button"
+                          onClick={() => setSelectedMobileUrl(cand.mobile_url)}
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-bold transition ${
+                            cand.mobile_url === mobileQrUrl
+                              ? 'border-sky-400 bg-sky-500/20 text-sky-200'
+                              : 'border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {cand.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="rounded-xl bg-white p-2.5">
                     <QRCodeSVG
-                      value={networkInfo.mobile_url}
+                      value={mobileQrUrl}
                       size={132}
                       level="M"
                     />
                   </div>
                   <p className="text-xs text-slate-300">
-                    Scan on Android/iPhone (same Wi-Fi or Hotspot):
+                    {qrCaption}:
                   </p>
-                  <code className="rounded bg-slate-900 px-2 py-1 text-[11px] text-sky-300">
-                    {networkInfo.mobile_url}
+                  <code className="max-w-full break-all rounded bg-slate-900 px-2 py-1 text-[11px] text-sky-300">
+                    {mobileQrUrl}
                   </code>
                 </>
               ) : (

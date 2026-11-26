@@ -192,10 +192,19 @@ export interface BenchmarkReport {
   samples: PerSampleComparison[];
 }
 
+export interface NetworkCandidate {
+  label: string;
+  mobile_url: string;
+  kind: 'tunnel' | 'hotspot' | 'lan';
+}
+
 export interface NetworkInfo {
   lan_ip: string;
   mobile_url: string;
   dashboard_url: string;
+  public_origin?: string | null;
+  candidates?: NetworkCandidate[];
+  session_locked?: boolean;
 }
 
 export interface DemoSceneSummary {
@@ -205,10 +214,11 @@ export interface DemoSceneSummary {
 }
 
 export interface DashboardMessage {
-  type: 'status' | 'telemetry';
+  type: 'status' | 'telemetry' | 'network_info';
   phone_connected?: boolean;
   guidance?: GuidancePayload | null;
   raw_b64?: string | null;
   depth_b64?: string | null;
-  simulated_note?: string;
+  simulated_note?: string | null;
+  network_info?: NetworkInfo;
 }
