@@ -28,6 +28,7 @@ const RU_OBJECT_NAMES: Record<string, string> = {
   backpack: 'Рюкзак',
   suitcase: 'Чемодан',
   'trash can': 'Урна',
+  manhole: 'Люк',
   bicycle: 'Велосипед',
   car: 'Машина',
   dog: 'Собака',
