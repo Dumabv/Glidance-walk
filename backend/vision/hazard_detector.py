@@ -255,6 +255,7 @@ class GroundAwareHazardDetector:
         self._c_state_ref = ctypes.byref(self._c_state)
         self._c_out_ref = ctypes.byref(self._c_out)
         self.kernel_backend = "rust-simd" if _RUST_ANALYZE_FN is not None else "numpy-verified"
+        self._yolo_alert_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._yolo_danger_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._last_steer: SteeringAction = "CLEAR"
 
@@ -281,6 +282,7 @@ class GroundAwareHazardDetector:
         with self._lock:
             self._c_state = _CDetectorState()
             self._c_state_ref = ctypes.byref(self._c_state)
+            self._yolo_alert_streak = {"left": 0, "center": 0, "right": 0}
             self._yolo_danger_streak = {"left": 0, "center": 0, "right": 0}
             self._last_steer = "CLEAR"
 
@@ -301,35 +303,61 @@ class GroundAwareHazardDetector:
             "right": haz.right.severity,
         }
 
-        # Filter YOLO danger spikes through the same `confirm_frames` debounce as depth hazards
+        # Filter YOLO alert & danger spikes through `confirm_frames` debounce so 1-frame flickers don't nag
         stabilized_objs: list[DetectedObject] = []
+        seen_alert: set[Corridor] = set()
         seen_danger: set[Corridor] = set()
         for obj in objects:
-            if obj.confidence >= 0.40 and obj.severity == "danger":
-                seen_danger.add(obj.corridor)
+            if obj.confidence >= 0.40 and obj.severity != "clear":
+                seen_alert.add(obj.corridor)
+                if obj.severity == "danger":
+                    seen_danger.add(obj.corridor)
 
         with self._lock:
             confirm_n = max(1, int(self.config.confirm_frames))
             for side in ("left", "center", "right"):
+                if side in seen_alert or base_sevs[side] != "clear":
+                    self._yolo_alert_streak[side] += 1
+                else:
+                    self._yolo_alert_streak[side] = 0
                 if side in seen_danger or base_sevs[side] == "danger":
                     self._yolo_danger_streak[side] += 1
                 else:
                     self._yolo_danger_streak[side] = 0
-            streaks = dict(self._yolo_danger_streak)
+            alert_streaks = dict(self._yolo_alert_streak)
+            danger_streaks = dict(self._yolo_danger_streak)
 
         for obj in objects:
             if (
+                obj.severity == "caution"
+                and base_sevs[obj.corridor] == "clear"
+                and alert_streaks[obj.corridor] < confirm_n
+            ):
+                continue
+            if (
                 obj.severity == "danger"
                 and base_sevs[obj.corridor] != "danger"
-                and streaks[obj.corridor] < confirm_n
+                and danger_streaks[obj.corridor] < confirm_n
             ):
                 stabilized_objs.append(obj.model_copy(update={"severity": "caution"}))
             else:
                 stabilized_objs.append(obj)
 
         fused = fuse_yolo_with_verified_hazard(haz, stabilized_objs, self.config)
+        if fused.curb.detected and _has_foreground_object_on_curb(objects):
+            # Suppress false curb even if the foreground chair/person was debounced on frame 1
+            fused = fuse_yolo_with_verified_hazard(
+                replace(
+                    haz,
+                    curb=haz.curb.model_copy(
+                        update={"detected": False, "stairs_likely": False, "confidence": 0.0}
+                    ),
+                ),
+                stabilized_objs,
+                self.config,
+            )
 
-        # Directional hysteresis: avoid rapid VEER_LEFT <-> VEER_RIGHT ping-pong when both sides are close in score.
+        # Directional hysteresis: prevent rapid VEER_LEFT <-> VEER_RIGHT ping-pong when both sides are safe.
         # Strictly preserves Lean 4 "Never Steer Into Danger" (never holds a direction whose corridor is `danger`).
         with self._lock:
             prev_steer = self._last_steer
@@ -347,7 +375,7 @@ class GroundAwareHazardDetector:
                 if (
                     prev_code < 2
                     and prev_code <= new_code
-                    and (prev_z.obstacle_score - new_z.obstacle_score) < 0.08
+                    and (prev_z.obstacle_score - new_z.obstacle_score) < 0.18
                 ):
                     steering = prev_steer
                     if steering == "VEER_LEFT":
@@ -833,13 +861,15 @@ def fuse_yolo_with_verified_hazard(
     overall_sev = haz.overall_severity
     steering = haz.steering
 
-    # A full-body close obstacle in center (e.g. person at 0.4m) is a front barrier, not a hanging overhang.
+    # A full-body close person (<= 1.25m) filling the frame is a front barrier, not a hanging overhang.
     c_obj = nearest_by_corridor.get("center")
     l_obj = nearest_by_corridor.get("left")
     r_obj = nearest_by_corridor.get("right")
-    overhead_hazard = haz.overhead_hazard and not (
-        c_obj is not None and c_obj.severity == "danger" and c_obj.bbox_norm[3] >= 0.70
+    has_close_person = any(
+        o.confidence >= 0.40 and o.label == "person" and o.distance_m <= 1.25
+        for o in objects
     )
+    overhead_hazard = haz.overhead_hazard and not has_close_person
 
     # Re-run Lean-4 verified decision core whenever YOLO upgrades severity or suppresses a false curb
     if upgraded and not overhead_hazard and not haz.wall_override:
