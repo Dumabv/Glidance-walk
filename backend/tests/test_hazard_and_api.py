@@ -424,3 +424,104 @@ def test_classroom_video_regression_fixes() -> None:
     )
     codes = {item["code"] for item in diag["findings"]}
     assert "CUE_CONTRADICTION" in codes
+
+
+def test_ci_baked_classroom_photos_and_71s_walk_replay() -> None:
+    """Fast GPU-free CI regression gate across 20 real classroom photos + full 71s classroom walk."""
+    from pathlib import Path
+    from backend.evaluation.trace_replay import replay_real_photos_trace, replay_trace
+
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    photo_rep = replay_real_photos_trace(
+        fixtures / "real_photos_trace.npz",
+        fixtures / "real_photos_meta.json",
+    )
+    assert photo_rep["sample_count"] >= 20
+    assert photo_rep["smart"]["f1"] >= 0.75
+    assert photo_rep["smart"]["f1"] > photo_rep["naive"]["f1"]
+
+    walk_rep = replay_trace(
+        fixtures / "classroom_walk_trace.npz",
+        fixtures / "classroom_walk_meta.json",
+    )
+    assert walk_rep["processed_frames"] >= 300
+    assert walk_rep["invariant_violations"] == []
+    assert walk_rep["diagnostics"]["health_score"] >= 60
+    assert walk_rep["passed"] is True
+    assert all(sc["passed"] for sc in walk_rep["scenarios"])
+
+
+def test_blank_vertical_wall_triggers_stop_while_far_wall_and_floor_stay_clear() -> None:
+    """Blank matte wall at ~1.3-1.6m (inverted/flat vertical depth) must STOP; 3.5m+ wall & open floor stay CLEAR."""
+    from backend.vision.hazard_detector import fuse_close_range_metric_depth
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+
+    # 1. Close vertical wall (top 1.15m -> baseboard 1.62m, uniform across L/C/R) -> STOP + wall_override
+    h, w = 180, 140
+    y = np.linspace(1.10, 1.65, h, dtype=np.float32)[:, None]
+    close_wall = np.repeat(y, w, axis=1)
+    wall_res = fuse_close_range_metric_depth(base_haz, close_wall, pitch_deg=72.0, config=cfg)
+    assert wall_res.overall_severity == "danger"
+    assert wall_res.steering == "STOP"
+    assert wall_res.wall_override is True
+    assert "Wall ahead" in wall_res.spoken_cue
+
+    # 2. Far empty wall (3.6m away) -> stays CLEAR (no false alarm)
+    far_wall = np.full((h, w), 3.6, dtype=np.float32)
+    far_res = fuse_close_range_metric_depth(base_haz, far_wall, pitch_deg=72.0, config=cfg)
+    assert far_res.steering == "CLEAR"
+    assert far_res.overall_severity == "clear"
+
+    # 3. Open hallway floor (top 3.2m -> bottom 1.5m, positive receding slope) -> stays CLEAR
+    y_floor = np.linspace(3.2, 1.5, h, dtype=np.float32)[:, None]
+    open_floor = np.repeat(y_floor, w, axis=1)
+    floor_res = fuse_close_range_metric_depth(base_haz, open_floor, pitch_deg=72.0, config=cfg)
+    assert floor_res.steering == "CLEAR"
+    assert floor_res.overall_severity == "clear"
+
+
+def test_relative_large_model_planar_wall_triggers_stop_and_ignores_clear_floors() -> None:
+    """Relative models (Depth-Anything-V2-Large-FP16 ONNX) must STOP on blank walls and ignore open floors."""
+    from backend.vision.hazard_detector import fuse_relative_planar_wall
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+
+    h, w = 180, 140
+    # 1. Tilted-down blank wall (top closer ~0.68 -> baseboard farther ~0.05) -> STOP
+    wall_cl = np.repeat(np.linspace(0.70, 0.04, h, dtype=np.float32)[:, None], w, axis=1)
+    res_wall = fuse_relative_planar_wall(base_haz, wall_cl, pitch_deg=72.0, config=cfg)
+    assert res_wall.steering == "STOP"
+    assert res_wall.overall_severity == "danger"
+    assert res_wall.wall_override is True
+    assert "Wall ahead" in res_wall.spoken_cue
+
+    # 2. Straight-on close wall (uniform closeness ~0.82 top-to-bottom) -> STOP
+    flat_wall = np.full((h, w), 0.82, dtype=np.float32)
+    res_flat = fuse_relative_planar_wall(base_haz, flat_wall, pitch_deg=88.0, config=cfg)
+    assert res_flat.steering == "STOP"
+    assert res_flat.wall_override is True
+
+    # 3. Open floor (top far ~0.10 -> bottom close ~0.75) -> stays CLEAR
+    floor_cl = np.repeat(np.linspace(0.10, 0.75, h, dtype=np.float32)[:, None], w, axis=1)
+    res_floor = fuse_relative_planar_wall(base_haz, floor_cl, pitch_deg=72.0, config=cfg)
+    assert res_floor.steering == "CLEAR"
+    assert res_floor.wall_override is False
+
+    # 4. Aimed at ceiling (pitch=130°) -> ignored so ceiling never triggers wall STOP
+    res_ceil = fuse_relative_planar_wall(base_haz, wall_cl, pitch_deg=130.0, config=cfg)
+    assert res_ceil.steering == "CLEAR"

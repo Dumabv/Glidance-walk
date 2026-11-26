@@ -1,0 +1,503 @@
+{
+  "trace_name": "real_photos",
+  "sample_count": 22,
+  "depth_model": "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
+  "is_metric_model": true,
+  "yolo_active": true,
+  "samples": [
+    {
+      "index": 0,
+      "sample_id": "real-e6bb5c41",
+      "label": "clear",
+      "note": "IMG_7723 @ 0:19 - Clear wooden hallway floor with glass partition on far left",
+      "raw_spread_milli": 237,
+      "luma_mean": 126.46,
+      "luma_std": 40.97,
+      "objects": []
+    },
+    {
+      "index": 1,
+      "sample_id": "real-20e1a607",
+      "label": "clear",
+      "note": "IMG_7723 @ 0:26 - Clear wooden floor mid-corridor",
+      "raw_spread_milli": 694,
+      "luma_mean": 136.14,
+      "luma_std": 42.95,
+      "objects": []
+    },
+    {
+      "index": 2,
+      "sample_id": "real-14978880",
+      "label": "clear",
+      "note": "IMG_7723 @ 0:28 - Clear wooden floor with doorway ahead in distance",
+      "raw_spread_milli": 353,
+      "luma_mean": 128.1,
+      "luma_std": 47.21,
+      "objects": []
+    },
+    {
+      "index": 3,
+      "sample_id": "real-21317ee0",
+      "label": "obstacle_left",
+      "note": "IMG_7723 @ 0:09 - White cast-iron radiator protruding on left",
+      "raw_spread_milli": 229,
+      "luma_mean": 124.96,
+      "luma_std": 58.37,
+      "objects": []
+    },
+    {
+      "index": 4,
+      "sample_id": "real-262a70eb",
+      "label": "obstacle_left",
+      "note": "IMG_7723 @ 0:18 - Hanging jacket on coat rack on left",
+      "raw_spread_milli": 172,
+      "luma_mean": 128.7,
+      "luma_std": 52.8,
+      "objects": []
+    },
+    {
+      "index": 5,
+      "sample_id": "real-71c0f4f2",
+      "label": "obstacle_left",
+      "note": "IMG_7723 @ 0:34 - Seated person and chair protruding on left",
+      "raw_spread_milli": 376,
+      "luma_mean": 107.34,
+      "luma_std": 60.51,
+      "objects": [
+        {
+          "label": "chair",
+          "confidence": 0.392,
+          "distance_m": 2.68,
+          "corridor": "right",
+          "bbox_norm": [
+            0.6429,
+            0.0,
+            1.0,
+            0.3244
+          ],
+          "severity": "clear"
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "sample_id": "real-4cfaf127",
+      "label": "obstacle_left",
+      "note": "IMG_7723 @ 0:39 - Black puffer jacket protruding on left",
+      "raw_spread_milli": 204,
+      "luma_mean": 127.61,
+      "luma_std": 53.02,
+      "objects": []
+    },
+    {
+      "index": 7,
+      "sample_id": "real-47dd0dee",
+      "label": "obstacle_left",
+      "note": "IMG_7723 @ 0:45 - Jackets and chairs protruding on left side",
+      "raw_spread_milli": 239,
+      "luma_mean": 92.85,
+      "luma_std": 56.62,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.684,
+          "distance_m": 1.1,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.003,
+            0.7041,
+            0.9583
+          ],
+          "severity": "danger"
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "sample_id": "real-18b8ae7b",
+      "label": "obstacle_center",
+      "note": "IMG_7723 @ 0:14 - Coat rack stand and hanging jackets directly ahead",
+      "raw_spread_milli": 122,
+      "luma_mean": 104.96,
+      "luma_std": 52.66,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.635,
+          "distance_m": 2.11,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.003,
+            1.0,
+            0.994
+          ],
+          "severity": "caution"
+        }
+      ]
+    },
+    {
+      "index": 9,
+      "sample_id": "real-9ac65b69",
+      "label": "obstacle_center",
+      "note": "IMG_7723 @ 0:31 - Classroom chair and desk blocking center path",
+      "raw_spread_milli": 163,
+      "luma_mean": 114.23,
+      "luma_std": 57.51,
+      "objects": [
+        {
+          "label": "chair",
+          "confidence": 0.799,
+          "distance_m": 2.03,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.2321,
+            0.7398,
+            0.7827
+          ],
+          "severity": "caution"
+        },
+        {
+          "label": "dining table",
+          "confidence": 0.382,
+          "distance_m": 2.43,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.0,
+            1.0,
+            0.6667
+          ],
+          "severity": "clear"
+        }
+      ]
+    },
+    {
+      "index": 10,
+      "sample_id": "real-2003648c",
+      "label": "obstacle_center",
+      "note": "IMG_7723 @ 0:32 - Seated student and desk directly ahead",
+      "raw_spread_milli": 206,
+      "luma_mean": 102.38,
+      "luma_std": 56.14,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.698,
+          "distance_m": 1.89,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.003,
+            1.0,
+            0.9911
+          ],
+          "severity": "caution"
+        }
+      ]
+    },
+    {
+      "index": 11,
+      "sample_id": "real-6a19129d",
+      "label": "obstacle_center",
+      "note": "IMG_7723 @ 0:36 - Puffer jacket on chair and blue desk directly ahead",
+      "raw_spread_milli": 581,
+      "luma_mean": 101.55,
+      "luma_std": 75.72,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.612,
+          "distance_m": 0.82,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.369,
+            0.9643,
+            1.0
+          ],
+          "severity": "danger"
+        }
+      ]
+    },
+    {
+      "index": 12,
+      "sample_id": "real-5cae4ad5",
+      "label": "obstacle_center",
+      "note": "IMG_7723 @ 0:48 - Seated person on chair blocking center aisle",
+      "raw_spread_milli": 337,
+      "luma_mean": 75.18,
+      "luma_std": 48.46,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.517,
+          "distance_m": 0.89,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0051,
+            0.0,
+            0.6633,
+            0.6488
+          ],
+          "severity": "danger"
+        },
+        {
+          "label": "person",
+          "confidence": 0.441,
+          "distance_m": 0.98,
+          "corridor": "right",
+          "bbox_norm": [
+            0.5918,
+            0.1518,
+            1.0,
+            0.9762
+          ],
+          "severity": "danger"
+        }
+      ]
+    },
+    {
+      "index": 13,
+      "sample_id": "real-f6a8f885",
+      "label": "obstacle_center",
+      "note": "IMG_7723 @ 0:49 - Black jacket on chair blocking center path",
+      "raw_spread_milli": 349,
+      "luma_mean": 67.64,
+      "luma_std": 54.05,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.717,
+          "distance_m": 1.12,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.131,
+            0.8878,
+            0.997
+          ],
+          "severity": "danger"
+        },
+        {
+          "label": "chair",
+          "confidence": 0.461,
+          "distance_m": 1.95,
+          "corridor": "right",
+          "bbox_norm": [
+            0.5663,
+            0.0,
+            1.0,
+            0.9702
+          ],
+          "severity": "caution"
+        }
+      ]
+    },
+    {
+      "index": 14,
+      "sample_id": "real-93bddbd6",
+      "label": "obstacle_right",
+      "note": "IMG_7723 @ 0:22 - Office chair back protruding on right",
+      "raw_spread_milli": 829,
+      "luma_mean": 112.99,
+      "luma_std": 56.09,
+      "objects": [
+        {
+          "label": "chair",
+          "confidence": 0.402,
+          "distance_m": 0.69,
+          "corridor": "right",
+          "bbox_norm": [
+            0.5714,
+            0.0149,
+            1.0,
+            0.997
+          ],
+          "severity": "danger"
+        }
+      ]
+    },
+    {
+      "index": 15,
+      "sample_id": "real-3edba69b",
+      "label": "obstacle_right",
+      "note": "IMG_7723 @ 0:29 - Chair and red jacket protruding on right",
+      "raw_spread_milli": 162,
+      "luma_mean": 107.09,
+      "luma_std": 51.39,
+      "objects": [
+        {
+          "label": "chair",
+          "confidence": 0.721,
+          "distance_m": 3.64,
+          "corridor": "right",
+          "bbox_norm": [
+            0.4847,
+            0.1607,
+            0.9898,
+            0.5238
+          ],
+          "severity": "clear"
+        },
+        {
+          "label": "chair",
+          "confidence": 0.547,
+          "distance_m": 4.08,
+          "corridor": "center",
+          "bbox_norm": [
+            0.1684,
+            0.0893,
+            0.5459,
+            0.4226
+          ],
+          "severity": "clear"
+        }
+      ]
+    },
+    {
+      "index": 16,
+      "sample_id": "real-cd267bae",
+      "label": "obstacle_right",
+      "note": "IMG_7723 @ 0:35 - Puffer jacket on chair protruding on right",
+      "raw_spread_milli": 329,
+      "luma_mean": 93.14,
+      "luma_std": 61.78,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.424,
+          "distance_m": 1.57,
+          "corridor": "center",
+          "bbox_norm": [
+            0.3112,
+            0.0,
+            0.9898,
+            0.4256
+          ],
+          "severity": "caution"
+        },
+        {
+          "label": "chair",
+          "confidence": 0.607,
+          "distance_m": 2.77,
+          "corridor": "left",
+          "bbox_norm": [
+            0.0051,
+            0.0,
+            0.4898,
+            0.3006
+          ],
+          "severity": "clear"
+        }
+      ]
+    },
+    {
+      "index": 17,
+      "sample_id": "real-4ea61b4a",
+      "label": "obstacle_right",
+      "note": "IMG_7723 @ 0:40 - Jacket on chair and seated person on right",
+      "raw_spread_milli": 151,
+      "luma_mean": 99.94,
+      "luma_std": 61.7,
+      "objects": [
+        {
+          "label": "person",
+          "confidence": 0.451,
+          "distance_m": 1.48,
+          "corridor": "center",
+          "bbox_norm": [
+            0.0,
+            0.0,
+            1.0,
+            0.997
+          ],
+          "severity": "caution"
+        }
+      ]
+    },
+    {
+      "index": 18,
+      "sample_id": "real-565b4b83",
+      "label": "clear",
+      "note": "Narrow passable gap test #1 - jacket left, office chairs right, physically passable center aisle",
+      "raw_spread_milli": 216,
+      "luma_mean": 77.82,
+      "luma_std": 53.81,
+      "objects": [
+        {
+          "label": "chair",
+          "confidence": 0.78,
+          "distance_m": 2.35,
+          "corridor": "right",
+          "bbox_norm": [
+            0.5556,
+            0.003,
+            1.0,
+            0.8244
+          ],
+          "severity": "clear"
+        }
+      ]
+    },
+    {
+      "index": 19,
+      "sample_id": "real-9c97d082",
+      "label": "clear",
+      "note": "Narrow passable gap test #2 - office chair left, jacket on chair right, physically passable center aisle",
+      "raw_spread_milli": 429,
+      "luma_mean": 68.02,
+      "luma_std": 57.98,
+      "objects": [
+        {
+          "label": "chair",
+          "confidence": 0.397,
+          "distance_m": 1.72,
+          "corridor": "right",
+          "bbox_norm": [
+            0.5159,
+            0.1488,
+            1.0,
+            0.8036
+          ],
+          "severity": "caution"
+        },
+        {
+          "label": "chair",
+          "confidence": 0.531,
+          "distance_m": 3.17,
+          "corridor": "center",
+          "bbox_norm": [
+            0.4008,
+            0.1667,
+            0.7063,
+            0.4464
+          ],
+          "severity": "clear"
+        }
+      ]
+    },
+    {
+      "index": 20,
+      "sample_id": "real-02de7a7a",
+      "label": "obstacle_center",
+      "note": "Blank grey hallway wall directly ahead (~1.5m) with tiled floor & shadow",
+      "raw_spread_milli": 241,
+      "luma_mean": 144.67,
+      "luma_std": 13.3,
+      "objects": []
+    },
+    {
+      "index": 21,
+      "sample_id": "real-06658b7f",
+      "label": "obstacle_center",
+      "note": "Blank sage-green hallway wall directly ahead (~1.3m) with tiled floor",
+      "raw_spread_milli": 205,
+      "luma_mean": 142.6,
+      "luma_std": 26.28,
+      "objects": []
+    }
+  ]
+}

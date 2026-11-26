@@ -18,6 +18,8 @@ from backend.vision.depth_engine import DepthEngine
 from backend.vision.hazard_detector import (
     GroundAwareHazardDetector,
     HazardResult,
+    fuse_close_range_metric_depth,
+    fuse_relative_planar_wall,
     fuse_yolo_with_verified_hazard,
 )
 from backend.vision.object_detector import SemanticObjectDetector
@@ -139,6 +141,10 @@ def run_benchmark(
             luma_mean=pred.luma_mean,
             luma_std=pred.luma_std,
         )
+        if depth_engine._is_metric_model and not depth_engine.use_mock and pred.depth_meters is not None:
+            s_res = fuse_close_range_metric_depth(s_res, pred.depth_meters, pitch_deg=0.0, config=config)
+        elif not depth_engine.use_mock:
+            s_res = fuse_relative_planar_wall(s_res, pred.closeness, pitch_deg=0.0, config=config)
         yolo_ms = 0.0
         if (
             object_detector is not None

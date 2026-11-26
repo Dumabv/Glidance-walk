@@ -46,6 +46,10 @@ jobs:
         run: pip install fastapi "uvicorn[standard]" pydantic numpy opencv-python-headless pillow httpx pytest python-multipart
       - name: Run backend tests (Rust vs NumPy parity + API/WS)
         run: python -m pytest -v backend/tests/test_hazard_and_api.py
+      - name: Run 71s classroom walk + 22 real photos CI evaluation & PR summary
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python scripts/ci_video_replay.py --github-summary
       - name: Upload native binary artifact
         uses: actions/upload-artifact@v4
         with:
