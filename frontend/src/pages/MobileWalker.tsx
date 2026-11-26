@@ -14,7 +14,6 @@ import {
   Play,
   Radio,
   RotateCcw,
-  Ruler,
   Save,
   Smartphone,
   SwitchCamera,
@@ -169,16 +168,6 @@ export function MobileWalker() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [sceneCaption, setSceneCaption] = useState<string | null>(null);
-  const [depthScale, setDepthScale] = useState<number>(() => {
-    try {
-      const saved = Number(window.localStorage.getItem('glidance_depth_scale_v1'));
-      return Number.isFinite(saved) && saved >= 0.35 && saved <= 2.2 ? saved : 1.0;
-    } catch {
-      return 1.0;
-    }
-  });
-  const depthScaleRef = useRef(depthScale);
-  const rawCenterDistRef = useRef<number | null>(null);
   const [approachingAlert, setApproachingAlert] = useState<{ label: string; distM: number; speedMps: number } | null>(null);
   const [devOpen, setDevOpen] = useState(false);
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);
@@ -275,29 +264,6 @@ export function MobileWalker() {
       }
     }
   }, [isFullscreen]);
-
-  useEffect(() => {
-    depthScaleRef.current = depthScale;
-    try {
-      window.localStorage.setItem('glidance_depth_scale_v1', depthScale.toFixed(3));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [depthScale]);
-
-  const calibrateOneMeter = useCallback(() => {
-    hapticsRef.current?.triggerTapFeedback();
-    const rawD = rawCenterDistRef.current;
-    if (!rawD || !Number.isFinite(rawD) || rawD <= 0.15) {
-      setSceneCaption('Point at a wall or object 1m away, then tap 1m Cal.');
-      window.setTimeout(() => setSceneCaption(null), 3000);
-      return;
-    }
-    const next = Math.max(0.35, Math.min(2.2, 1.0 / rawD));
-    setDepthScale(Math.round(next * 100) / 100);
-    setSceneCaption(`Calibrated to 1.0m (lens scale ${next.toFixed(2)}x)`);
-    window.setTimeout(() => setSceneCaption(null), 3200);
-  }, []);
 
   const toggleTorch = useCallback(async () => {
     hapticsRef.current?.triggerTapFeedback();
@@ -429,20 +395,6 @@ export function MobileWalker() {
           : memOut.snapshot
       );
     }
-    // Track unscaled center distance for 1-tap "1m Cal" and apply saved lens scale factor
-    rawCenterDistRef.current = data.center.min_distance_m;
-    const sc = depthScaleRef.current;
-    if (Math.abs(sc - 1.0) > 0.01) {
-      const clampM = (v: number) => Math.round(Math.max(0.25, Math.min(12.0, v * sc)) * 100) / 100;
-      data = {
-        ...data,
-        left: { ...data.left, min_distance_m: clampM(data.left.min_distance_m) },
-        center: { ...data.center, min_distance_m: clampM(data.center.min_distance_m) },
-        right: { ...data.right, min_distance_m: clampM(data.right.min_distance_m) },
-        objects: (data.objects ?? []).map((o) => ({ ...o, distance_m: clampM(o.distance_m) })),
-      };
-    }
-
     setGuidance(data);
 
     // Dynamic Approach-Speed Detector (person / car / bicycle / dog closing in > 0.65 m/s)
@@ -1682,19 +1634,6 @@ export function MobileWalker() {
                   )}
                 </div>
                 <div className="pointer-events-auto flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    aria-label="Calibrate 1 meter distance"
-                    onClick={calibrateOneMeter}
-                    className={`flex items-center gap-1 rounded-xl border px-2.5 py-2 text-xs font-bold backdrop-blur ${
-                      Math.abs(depthScale - 1.0) > 0.01
-                        ? 'border-cyan-400/80 bg-cyan-950/80 text-cyan-200'
-                        : 'border-white/25 bg-black/75 text-slate-200'
-                    }`}
-                  >
-                    <Ruler className="h-4 w-4" aria-hidden="true" />
-                    <span>{Math.abs(depthScale - 1.0) > 0.01 ? `${depthScale.toFixed(1)}x` : '1m'}</span>
-                  </button>
                   <button
                     type="button"
                     aria-label="Describe scene"
