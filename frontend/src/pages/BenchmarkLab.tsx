@@ -2,7 +2,10 @@ import { useCallback, useEffect, useId, useState } from 'react';
 import {
   BarChart3,
   Camera,
+  Check,
   CheckCircle2,
+  ClipboardCopy,
+  Download,
   Play,
   Trash2,
   Upload,
@@ -34,7 +37,43 @@ export function BenchmarkLab() {
   const [label, setLabel] = useState<SampleLabel>('clear');
   const [note, setNote] = useState('');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [copiedSummary, setCopiedSummary] = useState(false);
   const idPrefix = useId();
+
+  const downloadBenchmarkJson = () => {
+    if (!report) return;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const blob = new Blob([JSON.stringify(report, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `glidance-benchmark-${stamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const copySlideSummary = async () => {
+    if (!report) return;
+    const summary = [
+      `Glidance v2 Benchmark (${report.total_samples} scenes: ${report.real_samples} real, ${report.synthetic_samples} calibration | Device: ${report.device.toUpperCase()})`,
+      `- Overall F1: Glidance ${pct(report.smart.f1)} vs Naive ${pct(report.naive.f1)}`,
+      `- Curb / Drop-Off Recall: Glidance ${pct(report.smart.curb_recall)} vs Naive ${pct(report.naive.curb_recall)}`,
+      `- Directional Accuracy: Glidance ${pct(report.smart.direction_accuracy)} vs Naive ${pct(report.naive.direction_accuracy)}`,
+      `- Clear-Floor False Alarms: Glidance ${pct(report.smart.false_alarm_rate_clear)} vs Naive ${pct(report.naive.false_alarm_rate_clear)}`,
+      `- Latency: P50 ${report.smart.p50_ms.toFixed(1)} ms | P95 ${report.smart.p95_ms.toFixed(1)} ms`,
+    ].join('\n');
+    try {
+      await navigator.clipboard.writeText(summary);
+      setCopiedSummary(true);
+      window.setTimeout(() => setCopiedSummary(false), 2000);
+    } catch {
+      setStatusMsg('Clipboard access blocked — use Download JSON instead.');
+    }
+  };
 
   const loadSamples = useCallback(async () => {
     const res = await fetch('/api/samples');
@@ -178,6 +217,28 @@ export function BenchmarkLab() {
           >
             <Play className="h-4 w-4" aria-hidden="true" />
             {running ? 'Running Benchmark...' : 'Run Benchmark'}
+          </button>
+          <button
+            type="button"
+            onClick={downloadBenchmarkJson}
+            disabled={!report}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2.5 text-xs font-bold text-slate-100 hover:border-sky-400 hover:bg-slate-800 disabled:opacity-50"
+          >
+            <Download className="h-4 w-4 text-sky-400" aria-hidden="true" />
+            Download Benchmark JSON
+          </button>
+          <button
+            type="button"
+            onClick={() => void copySlideSummary()}
+            disabled={!report}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3.5 py-2.5 text-xs font-bold text-slate-100 hover:border-emerald-400 hover:bg-slate-800 disabled:opacity-50"
+          >
+            {copiedSummary ? (
+              <Check className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+            ) : (
+              <ClipboardCopy className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+            )}
+            {copiedSummary ? 'Copied Summary!' : 'Copy Slide Summary'}
           </button>
         </div>
       </div>
@@ -339,7 +400,7 @@ export function BenchmarkLab() {
                   <img
                     src={`data:image/jpeg;base64,${s.image_b64}`}
                     alt={`Captured hallway sample labeled ${s.label}`}
-                    className="aspect-[4/3] w-full object-cover"
+                    className="aspect-[4/3] w-full bg-slate-950 object-contain"
                   />
                 )}
                 <div className="flex items-center justify-between gap-1 p-2">

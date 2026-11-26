@@ -9,12 +9,17 @@ import {
   Minimize2,
   Play,
   Presentation,
+  RotateCcw,
   SlidersHorizontal,
   Smartphone,
   Wifi,
   X,
 } from 'lucide-react';
 import { BirdEyeRadar } from '../components/BirdEyeRadar';
+import {
+  LatencySparkline,
+  type LatencySample,
+} from '../components/LatencySparkline';
 import { RgbBoxOverlay } from '../components/RgbBoxOverlay';
 import { SteeringBanner } from '../components/SteeringBanner';
 import type {
@@ -46,7 +51,7 @@ export function MissionControl() {
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [demoScenes, setDemoScenes] = useState<DemoSceneSummary[]>([]);
   const [calibration, setCalibration] = useState<CalibrationConfig | null>(null);
-  const [latencyHistory, setLatencyHistory] = useState<number[]>([]);
+  const [latencyHistory, setLatencyHistory] = useState<LatencySample[]>([]);
   const [savingCalib, setSavingCalib] = useState(false);
   const [stageMode, setStageMode] = useState<boolean>(getInitialStageMode);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(
@@ -158,8 +163,12 @@ export function MissionControl() {
           if (msg.guidance) {
             setGuidance(msg.guidance);
             const srvMs = msg.guidance.latency.server_total_ms;
+            const infMs = msg.guidance.latency.inference_ms;
             if (srvMs > 0) {
-              setLatencyHistory((prev) => [...prev.slice(-59), srvMs]);
+              setLatencyHistory((prev) => [
+                ...prev.slice(-59),
+                { total: srvMs, inference: infMs },
+              ]);
             }
           }
           if (msg.type === 'telemetry') {
@@ -222,16 +231,22 @@ export function MissionControl() {
     }, 120);
   };
 
-  const p50 =
+  const resetMetrics = () => {
+    setLatencyHistory([]);
+  };
+
+  const sortedTotals =
     latencyHistory.length > 0
-      ? [...latencyHistory].sort((a, b) => a - b)[
-          Math.floor(latencyHistory.length * 0.5)
-        ]
+      ? latencyHistory.map((s) => s.total).sort((a, b) => a - b)
+      : [];
+  const p50 =
+    sortedTotals.length > 0
+      ? sortedTotals[Math.floor(sortedTotals.length * 0.5)]
       : 0;
   const p95 =
-    latencyHistory.length > 0
-      ? [...latencyHistory].sort((a, b) => a - b)[
-          Math.min(latencyHistory.length - 1, Math.floor(latencyHistory.length * 0.95))
+    sortedTotals.length > 0
+      ? sortedTotals[
+          Math.min(sortedTotals.length - 1, Math.floor(sortedTotals.length * 0.95))
         ]
       : 0;
 
@@ -415,9 +430,22 @@ export function MissionControl() {
               <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
               {phoneConnected ? 'Phone Live' : 'Waiting for Phone'}
             </span>
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-950 px-3 py-1 text-slate-200">
+            <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950 px-3 py-1 text-slate-200">
               <Gauge className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
-              P50 {p50.toFixed(1)}ms · P95 {p95.toFixed(1)}ms
+              <span>
+                P50 {p50.toFixed(1)}ms · P95 {p95.toFixed(1)}ms
+              </span>
+              <LatencySparkline samples={latencyHistory} width={76} height={18} />
+              <button
+                type="button"
+                onClick={resetMetrics}
+                disabled={latencyHistory.length === 0}
+                title="Reset P50/P95 latency metrics"
+                aria-label="Reset latency metrics"
+                className="rounded-full p-0.5 text-slate-400 transition hover:bg-slate-800 hover:text-white disabled:opacity-40"
+              >
+                <RotateCcw className="h-3 w-3" aria-hidden="true" />
+              </button>
             </span>
           </div>
 
@@ -499,9 +527,22 @@ export function MissionControl() {
             <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
             {phoneConnected ? 'Phone Streaming Live' : 'Waiting for Phone'}
           </span>
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-900 px-3 py-1.5 text-slate-200">
+          <span className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-slate-200">
             <Gauge className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
-            P50: {p50.toFixed(1)} ms · P95: {p95.toFixed(1)} ms
+            <span>
+              P50: {p50.toFixed(1)} ms · P95: {p95.toFixed(1)} ms
+            </span>
+            <LatencySparkline samples={latencyHistory} width={88} height={20} />
+            <button
+              type="button"
+              onClick={resetMetrics}
+              disabled={latencyHistory.length === 0}
+              title="Clear P50/P95 & sparkline history between demo runs"
+              className="inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-[11px] font-bold text-slate-200 transition hover:border-amber-400 hover:text-white disabled:opacity-40"
+            >
+              <RotateCcw className="h-3 w-3" aria-hidden="true" />
+              Reset Metrics
+            </button>
           </span>
 
           <button
@@ -620,11 +661,13 @@ export function MissionControl() {
           </div>
 
           {depthB64 ? (
-            <img
-              src={`data:image/jpeg;base64,${depthB64}`}
-              alt="Colorized depth map showing near obstacles in bright yellow and far areas in dark purple"
-              className="aspect-[4/3] w-full rounded-xl border border-slate-800 object-cover"
-            />
+            <div className="flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
+              <img
+                src={`data:image/jpeg;base64,${depthB64}`}
+                alt="Colorized depth map showing near obstacles in bright yellow and far areas in dark purple"
+                className="max-h-full max-w-full rounded-lg object-contain"
+              />
+            </div>
           ) : (
             <div className="flex aspect-[4/3] items-center justify-center rounded-xl border border-slate-800 bg-slate-950/70 p-6 text-center text-xs text-slate-400">
               Connect a phone or click a Demo Scene below to inspect live depth
