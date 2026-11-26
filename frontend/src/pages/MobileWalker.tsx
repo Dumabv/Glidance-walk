@@ -164,6 +164,7 @@ export function MobileWalker() {
   const [voiceLang, setVoiceLang] = useState<VoiceLang>('en');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [approachingAlert, setApproachingAlert] = useState<{ label: string; distM: number; speedMps: number } | null>(null);
   const [devOpen, setDevOpen] = useState(false);
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
@@ -175,6 +176,7 @@ export function MobileWalker() {
   const videoAspectRef = useRef<'portrait' | 'landscape'>('portrait');
   const dispatchFrameRef = useRef<(force?: boolean) => void>(() => {});
   const lastAnnouncedSteeringRef = useRef<string | null>(null);
+  const prevObjDistRef = useRef<Record<string, { distM: number; ts: number }>>({});
 
   const audioRef = useRef<SpatialAudioEngine | null>(null);
   const hapticsRef = useRef<HapticsEngine | null>(null);
@@ -326,6 +328,31 @@ export function MobileWalker() {
       );
     }
     setGuidance(data);
+
+    // Dynamic Approach-Speed Detector (person / car / bicycle / dog closing in > 0.65 m/s)
+    const nowPerf = performance.now();
+    const MOVABLE = new Set(['person', 'car', 'truck', 'bus', 'bicycle', 'motorcycle', 'dog']);
+    let fastApproach: { label: string; distM: number; speedMps: number } | null = null;
+    const prevMap = prevObjDistRef.current;
+    for (const obj of data.objects ?? []) {
+      const lbl = obj.label.toLowerCase();
+      if (!MOVABLE.has(lbl)) continue;
+      const trackKey = `${lbl}:${obj.corridor}`;
+      const prev = prevMap[trackKey];
+      if (prev) {
+        const dtSec = (nowPerf - prev.ts) / 1000;
+        if (dtSec >= 0.14 && dtSec <= 0.95) {
+          const closingSpeed = (prev.distM - obj.distance_m) / dtSec;
+          if (closingSpeed >= 0.65 && obj.distance_m <= 3.2) {
+            if (!fastApproach || obj.distance_m < fastApproach.distM) {
+              fastApproach = { label: lbl, distM: obj.distance_m, speedMps: Math.round(closingSpeed * 10) / 10 };
+            }
+          }
+        }
+      }
+      prevMap[trackKey] = { distM: obj.distance_m, ts: nowPerf };
+    }
+    setApproachingAlert(fastApproach);
 
     const now = Date.now();
     const measuredRtt = Math.max(1, Math.round(now - data.client_ts));
@@ -1452,7 +1479,62 @@ export function MobileWalker() {
           )}
           {isFullscreen && (
             <>
-              {/* Top HUD: detected objects, approx distance, FPS/RTT & Exit */}
+              {/* Live AR Bounding Box Overlay (30 FPS SVG, <0.1ms) */}
+              {guidance?.objects && guidance.objects.length > 0 && (
+                <svg
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                  className="pointer-events-none absolute inset-0 h-full w-full"
+                >
+                  {guidance.objects.slice(0, 5).map((obj, idx) => {
+                    const [bx1, by1, bx2, by2] = obj.bbox_norm;
+                    const x = Math.max(0, Math.min(99, bx1 * 100));
+                    const y = Math.max(0, Math.min(99, by1 * 100));
+                    const w = Math.max(1, Math.min(100 - x, (bx2 - bx1) * 100));
+                    const h = Math.max(1, Math.min(100 - y, (by2 - by1) * 100));
+                    const isApp = approachingAlert && approachingAlert.label === obj.label.toLowerCase();
+                    const stroke =
+                      isApp || obj.severity === 'danger'
+                        ? '#ef4444'
+                        : obj.severity === 'caution'
+                          ? '#f59e0b'
+                          : '#38bdf8';
+                    return (
+                      <g key={`ar-${obj.label}-${idx}`}>
+                        <rect
+                          x={x}
+                          y={y}
+                          width={w}
+                          height={h}
+                          fill={isApp ? 'rgba(239,68,68,0.16)' : 'none'}
+                          stroke={stroke}
+                          strokeWidth="0.7"
+                          rx="1.2"
+                        />
+                        <rect
+                          x={x}
+                          y={Math.max(0, y - 4.2)}
+                          width={Math.min(46, Math.max(18, (obj.label.length + 7) * 1.9))}
+                          height="4.2"
+                          fill="rgba(2,6,23,0.82)"
+                          rx="0.8"
+                        />
+                        <text
+                          x={x + 1.0}
+                          y={Math.max(3.1, y - 1.1)}
+                          fill={stroke}
+                          fontSize="2.7"
+                          fontWeight="800"
+                        >
+                          {`${isApp ? '⚡ ' : ''}${obj.label.toUpperCase()} ~${obj.distance_m.toFixed(1)}m`}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              )}
+
+              {/* Top HUD: detected objects, approx distance, FPS/RTT, Voice/Lang & Exit */}
               <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/80 via-black/45 to-transparent p-4">
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center gap-2">
@@ -1465,6 +1547,13 @@ export function MobileWalker() {
                       </span>
                     )}
                   </div>
+                  {approachingAlert && (
+                    <div className="inline-flex w-fit items-center gap-1.5 rounded-full border border-red-400 bg-red-600/90 px-3 py-1 text-xs font-black uppercase tracking-wide text-white shadow-lg">
+                      {voiceLang === 'ru'
+                        ? `⚡ ПРИБЛИЖАЕТСЯ: ${approachingAlert.label} (~${approachingAlert.distM.toFixed(1)}м, ${approachingAlert.speedMps}м/с)`
+                        : `⚡ APPROACHING: ${approachingAlert.label} (~${approachingAlert.distM.toFixed(1)}m, ${approachingAlert.speedMps}m/s)`}
+                    </div>
+                  )}
                   {guidance?.objects && guidance.objects.length > 0 && (
                     <div className="flex flex-wrap gap-1.5">
                       {guidance.objects.slice(0, 3).map((obj, idx) => (
@@ -1478,14 +1567,47 @@ export function MobileWalker() {
                     </div>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void toggleFullscreen()}
-                  className="pointer-events-auto flex items-center gap-1.5 rounded-xl border border-white/30 bg-black/75 px-3.5 py-2 text-xs font-bold text-white backdrop-blur hover:bg-slate-800"
-                >
-                  <Minimize2 className="h-4 w-4" aria-hidden="true" />
-                  Exit
-                </button>
+                <div className="pointer-events-auto flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label={voiceOn ? 'Mute voice' : 'Enable voice'}
+                    onClick={() => {
+                      audioRef.current?.unlock();
+                      hapticsRef.current?.triggerTapFeedback();
+                      setVoiceOn((v) => !v);
+                    }}
+                    className={`flex items-center justify-center rounded-xl border px-2.5 py-2 text-xs font-bold backdrop-blur ${
+                      voiceOn
+                        ? 'border-emerald-400/80 bg-emerald-950/80 text-emerald-200'
+                        : 'border-white/25 bg-black/75 text-slate-300'
+                    }`}
+                  >
+                    {voiceOn ? (
+                      <Volume2 className="h-4 w-4" aria-hidden="true" />
+                    ) : (
+                      <VolumeX className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Toggle voice language"
+                    onClick={() => {
+                      hapticsRef.current?.triggerTapFeedback();
+                      setVoiceLang((l) => (l === 'en' ? 'ru' : 'en'));
+                    }}
+                    className="rounded-xl border border-white/25 bg-black/75 px-2.5 py-2 text-xs font-black uppercase text-sky-200 backdrop-blur hover:bg-slate-800"
+                  >
+                    {voiceLang}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void toggleFullscreen()}
+                    className="flex items-center gap-1 rounded-xl border border-white/30 bg-black/75 px-3 py-2 text-xs font-bold text-white backdrop-blur hover:bg-slate-800"
+                  >
+                    <Minimize2 className="h-4 w-4" aria-hidden="true" />
+                    Exit
+                  </button>
+                </div>
               </div>
 
               {/* Bottom HUD: big steering banner + L/C/R distances */}
