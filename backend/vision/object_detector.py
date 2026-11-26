@@ -11,33 +11,52 @@ from PIL import Image
 
 from backend.schemas import Corridor, DetectedObject, Severity
 
-# Walkable indoor & sidewalk obstacle classes from COCO (ignores wall/tabletop clutter like laptops, bottles, TVs)
-WALKING_OBSTACLE_CLASSES = {
+# Open-vocabulary walking obstacle classes for YOLOv8s-Worldv2 (includes stairs, step, curb, door, wall, pillar, box!)
+WALKING_WORLD_CLASSES: list[str] = [
     "person",
+    "stairs",
+    "step",
+    "curb",
+    "door",
+    "glass door",
+    "wall",
+    "pillar",
+    "railing",
+    "chair",
+    "table",
+    "desk",
+    "bench",
+    "couch",
+    "box",
+    "backpack",
+    "suitcase",
+    "trash can",
     "bicycle",
     "car",
+    "dog",
+    "pole",
+]
+
+STAIRS_CURB_LABELS = {"stairs", "step", "curb"}
+
+# Superset of Open-Vocabulary + COCO obstacle classes (supports both YOLOv8s-Worldv2 and YOLOv8n fallback)
+WALKING_OBSTACLE_CLASSES = set(WALKING_WORLD_CLASSES) | {
     "motorcycle",
     "bus",
     "truck",
     "fire hydrant",
     "stop sign",
     "parking meter",
-    "bench",
-    "dog",
     "cat",
-    "backpack",
     "umbrella",
     "handbag",
-    "suitcase",
-    "chair",
-    "couch",
     "potted plant",
     "bed",
     "dining table",
     "refrigerator",
 }
 
-DEFAULT_YOLO_WEIGHTS = os.getenv("GLIDANCE_YOLO_MODEL", "yolov8n.pt")
+DEFAULT_YOLO_WEIGHTS = os.getenv("GLIDANCE_YOLO_MODEL", "yolov8s-worldv2.pt")
 DANGER_OBJECT_M = 1.25
 CAUTION_OBJECT_M = 2.25
 
@@ -131,7 +150,22 @@ class SemanticObjectDetector:
         models_dir.mkdir(parents=True, exist_ok=True)
         weight_path = models_dir / self.weights_name
 
-        self._model = YOLO(str(weight_path))
+        # Prefer Open-Vocabulary YOLOv8s-Worldv2 (detects stairs, step, curb, door, glass door, wall, pillar, box!)
+        if "world" in self.weights_name.lower():
+            try:
+                from ultralytics import YOLOWorld
+
+                world_model = YOLOWorld(str(weight_path))
+                world_model.set_classes(WALKING_WORLD_CLASSES)
+                self._model = world_model
+                self.conf_threshold = min(self.conf_threshold, 0.28)
+            except Exception:
+                # Graceful fallback to standard YOLOv8n if CLIP/World weights fail offline
+                self.weights_name = "yolov8n.pt"
+                self._model = YOLO(str(models_dir / self.weights_name))
+        else:
+            self._model = YOLO(str(weight_path))
+
         # Warm up on a blank frame so the first live stream frame stays fast
         dummy = np.zeros((240, 320, 3), dtype=np.uint8)
         self._model.predict(

@@ -8,8 +8,50 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+const RU_OBJECT_NAMES: Record<string, string> = {
+  person: 'Человек',
+  stairs: 'Лестница',
+  step: 'Ступенька',
+  curb: 'Бордюр',
+  door: 'Дверь',
+  'glass door': 'Стеклянная дверь',
+  wall: 'Стена',
+  pillar: 'Колонна',
+  railing: 'Перила',
+  chair: 'Стул',
+  table: 'Стол',
+  'dining table': 'Стол',
+  desk: 'Стол',
+  bench: 'Скамейка',
+  couch: 'Диван',
+  box: 'Коробка',
+  backpack: 'Рюкзак',
+  suitcase: 'Чемодан',
+  'trash can': 'Урна',
+  bicycle: 'Велосипед',
+  car: 'Машина',
+  dog: 'Собака',
+  pole: 'Столб',
+};
+
+function getNearestNamedObject(guidance: GuidancePayload): string | null {
+  const objs = guidance.objects;
+  if (!objs || objs.length === 0) return null;
+  const active = objs.filter((o) => o.severity !== 'clear' && o.confidence >= 0.3);
+  if (active.length === 0) return null;
+  const centerObj = active.find((o) => o.corridor === 'center');
+  return (centerObj ?? active[0]).label.toLowerCase();
+}
+
+function formatObjName(label: string, lang: VoiceLang): string {
+  if (lang === 'ru') {
+    return RU_OBJECT_NAMES[label] ?? label;
+  }
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 /**
- * Action-only 1-word aviation/rally callouts.
+ * Action-only 1–2 word aviation/rally callouts with specific obstacle naming (stairs/door/chair/person/wall).
  * NEVER mixes two directions in one phrase (eliminates "Obstacle on RIGHT, step LEFT" confusion!).
  */
 function getCrispCallout(
@@ -17,8 +59,9 @@ function getCrispCallout(
   lang: VoiceLang
 ): { key: string; text: string; urgent: boolean } | null {
   const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
+  const objLabel = getNearestNamedObject(guidance);
 
-  if (guidance.glass_barrier) {
+  if (guidance.glass_barrier || objLabel === 'glass door') {
     return {
       key: 'GLASS_BARRIER',
       text: lang === 'ru' ? 'Стекло впереди' : 'Glass ahead',
@@ -32,17 +75,17 @@ function getCrispCallout(
       urgent: true,
     };
   }
-  if (isCurb) {
-    if (guidance.curb.stairs_likely) {
+  if (isCurb || objLabel === 'stairs' || objLabel === 'step' || objLabel === 'curb') {
+    if (guidance.curb.stairs_likely || objLabel === 'stairs') {
       return {
         key: 'STAIRS',
-        text: lang === 'ru' ? 'Лестница вниз' : 'Stairs ahead',
+        text: lang === 'ru' ? 'Лестница' : 'Stairs ahead',
         urgent: true,
       };
     }
     return {
       key: 'CURB',
-      text: lang === 'ru' ? 'Ступенька' : 'Step down',
+      text: lang === 'ru' ? 'Ступенька' : 'Step ahead',
       urgent: true,
     };
   }
@@ -54,40 +97,64 @@ function getCrispCallout(
     };
   }
   if (guidance.steering === 'STOP') {
+    const noun = objLabel
+      ? formatObjName(objLabel, lang)
+      : guidance.wall_override
+        ? lang === 'ru'
+          ? 'Стена'
+          : 'Wall'
+        : null;
     if (typeof guidance.best_escape_deg === 'number' && Math.abs(guidance.best_escape_deg) >= 25) {
       const goLeft = guidance.best_escape_deg < 0;
+      const prefix = noun ? `${noun}, ` : '';
       return {
-        key: goLeft ? 'STOP_TURN_LEFT' : 'STOP_TURN_RIGHT',
+        key: `${noun ?? 'STOP'}_TURN_${goLeft ? 'L' : 'R'}`,
         text:
           lang === 'ru'
-            ? goLeft
-              ? 'Стоп, поверни влево'
-              : 'Стоп, поверни вправо'
-            : goLeft
-              ? 'Stop, turn left'
-              : 'Stop, turn right',
+            ? `${prefix}${goLeft ? 'стоп, влево' : 'стоп, вправо'}`
+            : `${prefix}${goLeft ? 'stop, turn left' : 'stop, turn right'}`,
         urgent: true,
       };
     }
     return {
-      key: 'STOP',
-      text: lang === 'ru' ? 'Стоп' : 'Stop',
+      key: noun ? `STOP_${objLabel ?? 'WALL'}` : 'STOP',
+      text: noun
+        ? lang === 'ru'
+          ? `${noun}, стоп`
+          : `${noun}, stop`
+        : lang === 'ru'
+          ? 'Стоп'
+          : 'Stop',
       urgent: true,
     };
   }
   if (guidance.steering === 'VEER_LEFT') {
     const isDanger = guidance.overall_severity === 'danger';
+    const noun = objLabel ? formatObjName(objLabel, lang) : null;
     return {
-      key: isDanger ? 'DANGER_LEFT' : 'CAUTION_LEFT',
-      text: lang === 'ru' ? 'Левее' : 'Left',
+      key: `${isDanger ? 'DANGER' : 'CAUTION'}_LEFT_${objLabel ?? 'GEN'}`,
+      text: noun
+        ? lang === 'ru'
+          ? `${noun}, левее`
+          : `${noun}, left`
+        : lang === 'ru'
+          ? 'Левее'
+          : 'Left',
       urgent: isDanger,
     };
   }
   if (guidance.steering === 'VEER_RIGHT') {
     const isDanger = guidance.overall_severity === 'danger';
+    const noun = objLabel ? formatObjName(objLabel, lang) : null;
     return {
-      key: isDanger ? 'DANGER_RIGHT' : 'CAUTION_RIGHT',
-      text: lang === 'ru' ? 'Правее' : 'Right',
+      key: `${isDanger ? 'DANGER' : 'CAUTION'}_RIGHT_${objLabel ?? 'GEN'}`,
+      text: noun
+        ? lang === 'ru'
+          ? `${noun}, правее`
+          : `${noun}, right`
+        : lang === 'ru'
+          ? 'Правее'
+          : 'Right',
       urgent: isDanger,
     };
   }

@@ -424,3 +424,42 @@ def test_classroom_video_regression_fixes() -> None:
     )
     codes = {item["code"] for item in diag["findings"]}
     assert "CUE_CONTRADICTION" in codes
+
+
+def test_yolo_world_stairs_and_step_escalation() -> None:
+    """Open-vocabulary stairs/step detections must escalate to CURB_DROP and resist foreground suppression."""
+    from backend.vision.hazard_detector import fuse_yolo_with_verified_hazard
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+    assert base_haz.curb.detected is False
+
+    stairs_center = DetectedObject(
+        label="stairs",
+        confidence=0.42,
+        distance_m=1.40,
+        corridor="center",
+        bbox_norm=[0.20, 0.45, 0.80, 0.92],
+        severity="caution",
+    )
+    nearby_person = DetectedObject(
+        label="person",
+        confidence=0.80,
+        distance_m=1.60,
+        corridor="right",
+        bbox_norm=[0.65, 0.20, 0.95, 0.88],
+        severity="caution",
+    )
+
+    fused = fuse_yolo_with_verified_hazard(base_haz, [stairs_center, nearby_person], cfg)
+    assert fused.curb.detected is True
+    assert fused.curb.stairs_likely is True
+    assert fused.steering == "CURB_DROP"
+    assert "Stairs" in fused.spoken_cue
+    assert "1.4m" in fused.spoken_cue

@@ -792,8 +792,16 @@ _FOREGROUND_VERTICAL_OBJECTS = {
 }
 
 
+_STAIRS_CURB_LABELS: set[str] = {"stairs", "step", "curb"}
+
+
 def _has_foreground_object_on_curb(objects: list[DetectedObject]) -> bool:
     """Detects a close vertical foreground obstacle (chair/person/table) that can mimic a curb edge."""
+    if any(
+        obj.label in _STAIRS_CURB_LABELS and obj.confidence >= 0.30 and obj.distance_m <= 2.3
+        for obj in objects
+    ):
+        return False
     for obj in objects:
         if obj.confidence < 0.40 or obj.label not in _FOREGROUND_VERTICAL_OBJECTS:
             continue
@@ -811,25 +819,54 @@ def fuse_yolo_with_verified_hazard(
     objects: list[DetectedObject],
     config: CalibrationConfig,
 ) -> HazardResult:
-    """Enriches corridor distances & spoken cues with YOLOv8n while preserving Lean 4 invariants."""
+    """Enriches corridor distances, stairs/curbs & spoken cues with YOLO-World while preserving Lean 4 invariants."""
     if not objects or haz.lens_blocked:
         return haz
 
+    visual_step = min(
+        (
+            obj
+            for obj in objects
+            if obj.label in _STAIRS_CURB_LABELS
+            and obj.confidence >= 0.30
+            and obj.corridor == "center"
+            and obj.distance_m <= 2.15
+        ),
+        key=lambda o: o.distance_m,
+        default=None,
+    )
+
     curb = haz.curb
     curb_suppressed = False
-    if curb.detected and _has_foreground_object_on_curb(objects):
+    curb_escalated = False
+    if visual_step is not None:
+        if not curb.detected or (visual_step.label == "stairs" and not curb.stairs_likely):
+            curb = curb.model_copy(
+                update={
+                    "detected": True,
+                    "stairs_likely": curb.stairs_likely or visual_step.label == "stairs",
+                    "confidence": max(curb.confidence, round(visual_step.confidence, 3)),
+                    "drop_row_ratio": round(
+                        max(curb.drop_row_ratio, float(visual_step.bbox_norm[3])),
+                        3,
+                    ),
+                }
+            )
+            curb_escalated = True
+    elif curb.detected and _has_foreground_object_on_curb(objects):
         curb = curb.model_copy(update={"detected": False, "stairs_likely": False, "confidence": 0.0})
         curb_suppressed = True
 
     nearest_by_corridor: dict[Corridor, DetectedObject] = {}
     for obj in objects:
-        if obj.confidence < 0.40 or obj.severity == "clear":
+        min_conf = 0.30 if obj.label in _STAIRS_CURB_LABELS else 0.32
+        if obj.confidence < min_conf or obj.severity == "clear":
             continue
         cur = nearest_by_corridor.get(obj.corridor)
         if cur is None or obj.distance_m < cur.distance_m:
             nearest_by_corridor[obj.corridor] = obj
 
-    if not nearest_by_corridor and not curb_suppressed:
+    if not nearest_by_corridor and not curb_suppressed and not curb_escalated:
         return haz
 
     zones: dict[Corridor, ZoneMetrics] = {
@@ -837,7 +874,7 @@ def fuse_yolo_with_verified_hazard(
         "center": haz.center,
         "right": haz.right,
     }
-    upgraded = curb_suppressed
+    upgraded = curb_suppressed or curb_escalated
     for side, obj in nearest_by_corridor.items():
         z = zones[side]
         new_dist = round(min(z.min_distance_m, obj.distance_m), 2)
@@ -888,7 +925,12 @@ def fuse_yolo_with_verified_hazard(
 
     # Enrich spoken_cue with the nearest named object and GUARANTEE non-CLEAR steering never says "Path clear."
     spoken = haz.spoken_cue
-    if not curb.detected and not overhead_hazard:
+    if curb.detected and visual_step is not None and not overhead_hazard:
+        if visual_step.label == "stairs" or curb.stairs_likely:
+            spoken = f"Stairs ahead ({visual_step.distance_m:.1f}m). Stop."
+        else:
+            spoken = f"{visual_step.label.capitalize()} ahead ({visual_step.distance_m:.1f}m). Stop."
+    elif not curb.detected and not overhead_hazard:
         if steering == "STOP":
             if c_obj is not None:
                 spoken = f"{c_obj.label.capitalize()} blocking path at {c_obj.distance_m:.1f}m. Stop."
