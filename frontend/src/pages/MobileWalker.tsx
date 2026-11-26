@@ -7,6 +7,7 @@ import {
   Eye,
   Film,
   Flashlight,
+  Headphones,
   Lock,
   Maximize2,
   Minimize2,
@@ -1232,15 +1233,16 @@ export function MobileWalker() {
         )}
       </div>
 
-      {/* Calm Guidance Profile Selector (eliminates audio fatigue & stationary nagging!) */}
+      {/* Calm Guidance Profile Selector (includes iOS + Android Headphones 3D Binaural mode!) */}
       <div
         role="group"
         aria-label="Audio guidance profile"
-        className="grid grid-cols-3 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 text-xs font-semibold"
+        className="grid grid-cols-2 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 text-xs font-semibold sm:grid-cols-4"
       >
         {(
           [
             { id: 'metal_detector', label: 'Metal Detector' },
+            { id: 'headphones_3d', label: '🎧 Headphones 3D' },
             { id: 'tactile_only', label: 'Silent Vibro' },
             { id: 'smart_calm', label: 'Smart Calm' },
           ] as const
@@ -1254,6 +1256,10 @@ export function MobileWalker() {
               audioRef.current?.unlock();
               hapticsRef.current?.triggerTapFeedback();
               setGuidanceProfile(p.id);
+              if (p.id === 'headphones_3d') {
+                setSonarOn(true);
+                audioRef.current?.playHeadphonesLRTest();
+              }
             }}
             className={`rounded-lg px-2 py-2 transition ${
               guidanceProfile === p.id
@@ -1265,6 +1271,22 @@ export function MobileWalker() {
           </button>
         ))}
       </div>
+
+      {guidanceProfile === 'headphones_3d' && (
+        <div className="flex items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/35 px-3 py-2 text-xs text-emerald-100">
+          <span className="flex items-center gap-1.5 font-medium">
+            <Headphones className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+            iOS &amp; Android 3D Stereo: Left ear = left obstacle · Right ear = right · Both = wall/stairs
+          </span>
+          <button
+            type="button"
+            onClick={() => audioRef.current?.playHeadphonesLRTest()}
+            className="shrink-0 rounded-lg border border-emerald-400/60 bg-emerald-900/70 px-2.5 py-1 font-bold text-emerald-100 hover:bg-emerald-800"
+          >
+            Test L/C/R
+          </button>
+        </div>
+      )}
 
       {/* Tactile & Audio controls */}
       <div className="grid grid-cols-2 gap-2.5">
@@ -1579,6 +1601,27 @@ export function MobileWalker() {
                   )}
                 </div>
                 <div className="pointer-events-auto flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label="Toggle Headphones 3D mode"
+                    onClick={() => {
+                      audioRef.current?.unlock();
+                      hapticsRef.current?.triggerTapFeedback();
+                      const next = guidanceProfile === 'headphones_3d' ? 'metal_detector' : 'headphones_3d';
+                      setGuidanceProfile(next);
+                      if (next === 'headphones_3d') {
+                        setSonarOn(true);
+                        audioRef.current?.playHeadphonesLRTest();
+                      }
+                    }}
+                    className={`flex items-center justify-center rounded-xl border px-2.5 py-2 text-xs font-bold backdrop-blur ${
+                      guidanceProfile === 'headphones_3d'
+                        ? 'border-emerald-400 bg-emerald-500/85 text-slate-950'
+                        : 'border-white/25 bg-black/75 text-slate-200'
+                    }`}
+                  >
+                    <Headphones className="h-4 w-4" aria-hidden="true" />
+                  </button>
                   <button
                     type="button"
                     aria-label="Describe scene"
