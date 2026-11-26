@@ -1,0 +1,176 @@
+[
+  {
+    "sample_id": "real-e6bb5c41",
+    "label": "clear",
+    "note": "IMG_7723 @ 0:19 - Clear wooden hallway floor with glass partition on far left",
+    "created_at": 1795683088.4629078
+  },
+  {
+    "sample_id": "real-20e1a607",
+    "label": "clear",
+    "note": "IMG_7723 @ 0:26 - Clear wooden floor mid-corridor",
+    "created_at": 1795683088.683062
+  },
+  {
+    "sample_id": "real-14978880",
+    "label": "clear",
+    "note": "IMG_7723 @ 0:28 - Clear wooden floor with doorway ahead in distance",
+    "created_at": 1795683088.792436
+  },
+  {
+    "sample_id": "real-21317ee0",
+    "label": "obstacle_left",
+    "note": "IMG_7723 @ 0:09 - White cast-iron radiator protruding on left",
+    "created_at": 1795683088.84799
+  },
+  {
+    "sample_id": "real-262a70eb",
+    "label": "obstacle_left",
+    "note": "IMG_7723 @ 0:18 - Hanging jacket on coat rack on left",
+    "created_at": 1795683088.8980942
+  },
+  {
+    "sample_id": "real-71c0f4f2",
+    "label": "obstacle_left",
+    "note": "IMG_7723 @ 0:34 - Seated person and chair protruding on left",
+    "created_at": 1795683088.932311
+  },
+  {
+    "sample_id": "real-4cfaf127",
+    "label": "obstacle_left",
+    "note": "IMG_7723 @ 0:39 - Black puffer jacket protruding on left",
+    "created_at": 1795683088.9745011
+  },
+  {
+    "sample_id": "real-47dd0dee",
+    "label": "obstacle_left",
+    "note": "IMG_7723 @ 0:45 - Jackets and chairs protruding on left side",
+    "created_at": 1795683089.013419
+  },
+  {
+    "sample_id": "real-18b8ae7b",
+    "label": "obstacle_center",
+    "note": "IMG_7723 @ 0:14 - Coat rack stand and hanging jackets directly ahead",
+    "created_at": 1795683089.076156
+  },
+  {
+    "sample_id": "real-9ac65b69",
+    "label": "obstacle_center",
+    "note": "IMG_7723 @ 0:31 - Classroom chair and desk blocking center path",
+    "created_at": 1795683089.142339
+  },
+  {
+    "sample_id": "real-2003648c",
+    "label": "obstacle_center",
+    "note": "IMG_7723 @ 0:32 - Seated student and desk directly ahead",
+    "created_at": 1795683089.191678
+  },
+  {
+    "sample_id": "real-6a19129d",
+    "label": "obstacle_center",
+    "note": "IMG_7723 @ 0:36 - Puffer jacket on chair and blue desk directly ahead",
+    "created_at": 1795683089.2339149
+  },
+  {
+    "sample_id": "real-5cae4ad5",
+    "label": "obstacle_center",
+    "note": "IMG_7723 @ 0:48 - Seated person on chair blocking center aisle",
+    "created_at": 1795683089.282899
+  },
+  {
+    "sample_id": "real-f6a8f885",
+    "label": "obstacle_center",
+    "note": "IMG_7723 @ 0:49 - Black jacket on chair blocking center path",
+    "created_at": 1795683089.331454
+  },
+  {
+    "sample_id": "real-93bddbd6",
+    "label": "obstacle_right",
+    "note": "IMG_7723 @ 0:22 - Office chair back protruding on right",
+    "created_at": 1795683089.3828921
+  },
+  {
+    "sample_id": "real-3edba69b",
+    "label": "obstacle_right",
+    "note": "IMG_7723 @ 0:29 - Chair and red jacket protruding on right",
+    "created_at": 1795683089.4850528
+  },
+  {
+    "sample_id": "real-cd267bae",
+    "label": "obstacle_right",
+    "note": "IMG_7723 @ 0:35 - Puffer jacket on chair protruding on right",
+    "created_at": 1795683089.5439649
+  },
+  {
+    "sample_id": "real-4ea61b4a",
+    "label": "obstacle_right",
+    "note": "IMG_7723 @ 0:40 - Jacket on chair and seated person on right",
+    "created_at": 1795683089.604527
+  },
+  {
+    "sample_id": "real-565b4b83",
+    "label": "clear",
+    "note": "Narrow passable gap test #1 - jacket left, office chairs right, physically passable center aisle",
+    "created_at": 1795683506.327882
+  },
+  {
+    "sample_id": "real-9c97d082",
+    "label": "clear",
+    "note": "Narrow passable gap test #2 - office chair left, jacket on chair right, physically passable center aisle",
+    "created_at": 1795683506.332442
+  },
+  {
+    "sample_id": "real-02de7a7a",
+    "label": "obstacle_center",
+    "note": "Blank grey hallway wall directly ahead (~1.5m) with tiled floor & shadow",
+    "created_at": 1795696205.57973
+  },
+  {
+    "sample_id": "real-06658b7f",
+    "label": "obstacle_center",
+    "note": "Blank sage-green hallway wall directly ahead (~1.3m) with tiled floor",
+    "created_at": 1795696205.703053
+  },
+  {
+    "sample_id": "real-4a9c8f63",
+    "label": "clear",
+    "note": "IMG_7723 @ 0:24 - Clear wooden classroom corridor floor with glass wall on far left",
+    "created_at": 1795725288.9096892
+  },
+  {
+    "sample_id": "real-693e50b3",
+    "label": "obstacle_right",
+    "note": "IMG_7723 @ 0:50 - Office chair backrest protruding on right side of aisle",
+    "created_at": 1795725288.959046
+  },
+  {
+    "sample_id": "real-f2ec2681",
+    "label": "curb_drop",
+    "note": "IMG_7723 @ 1:01 - Wooden podium step edge ~1.4m ahead",
+    "created_at": 1795725289.01472
+  },
+  {
+    "sample_id": "real-53abdc4a",
+    "label": "curb_drop",
+    "note": "IMG_7723 @ 1:02 - Wooden step drop-off with dark anti-slip nosing ~1.0m ahead",
+    "created_at": 1795725289.05037
+  },
+  {
+    "sample_id": "real-1482f8b7",
+    "label": "curb_drop",
+    "note": "IMG_7723 @ 1:04 - Diagonal corner wooden step drop-off",
+    "created_at": 1795725289.116813
+  },
+  {
+    "sample_id": "real-ec6f52b2",
+    "label": "curb_drop",
+    "note": "IMG_7723 @ 1:05 - Two-step wooden classroom staircase descending",
+    "created_at": 1795725289.1620119
+  },
+  {
+    "sample_id": "real-4ce6e2a0",
+    "label": "curb_drop",
+    "note": "IMG_7723 @ 1:07 - Multi-step wooden stairs along classroom wall",
+    "created_at": 1795725289.221948
+  }
+]
