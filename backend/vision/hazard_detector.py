@@ -873,6 +873,7 @@ def fuse_yolo_with_verified_hazard(
 
     # Re-run Lean-4 verified decision core whenever YOLO upgrades severity or suppresses a false curb.
     # ALWAYS re-run even on wall_override so overall_severity == max(L,C,R,curb) & never-steer-into-danger hold!
+    spoken = haz.spoken_cue
     if upgraded:
         ov_code, act_code = decide_guidance_verified(
             _SEV_TO_CODE[left_z.severity],
@@ -893,7 +894,6 @@ def fuse_yolo_with_verified_hazard(
                 spoken = CUE_BY_CODE[14]
 
     # Enrich spoken_cue with the nearest named object and GUARANTEE non-CLEAR steering never says "Path clear."
-    spoken = haz.spoken_cue
     if not curb.detected and not overhead_hazard:
         if steering == "STOP":
             if c_obj is not None:
