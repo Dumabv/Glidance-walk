@@ -193,3 +193,49 @@ test('iPhone switchCameraStream: stops front camera, switches to main Back Camer
     restore();
   }
 });
+
+test('Stage 4 recovery: never returns a stopped stream if exact deviceId returns OverconstrainedError', async () => {
+  let getUserMediaCount = 0;
+  const firstFrontStream = makeFakeStream({
+    deviceId: 'ios-front',
+    label: 'Front Camera',
+    facingMode: 'user',
+  });
+  const recoveredLiveStream = makeFakeStream({
+    deviceId: 'ios-front',
+    label: 'Front Camera',
+    facingMode: 'user',
+  });
+
+  const restore = setNavigatorMediaDevices({
+    enumerateDevices: async () =>
+      [
+        { kind: 'videoinput', deviceId: 'ios-front', label: 'Front Camera' },
+        { kind: 'videoinput', deviceId: 'ios-back-broken', label: 'Back Camera' },
+      ] as MediaDeviceInfo[],
+    getUserMedia: async (constraints?: MediaStreamConstraints) => {
+      getUserMediaCount += 1;
+      const v = constraints?.video;
+      if (
+        typeof v === 'object' &&
+        v !== null &&
+        ((typeof v.facingMode === 'object' && v.facingMode !== null && 'exact' in v.facingMode) ||
+          (typeof v.deviceId === 'object' && v.deviceId !== null && 'exact' in v.deviceId))
+      ) {
+        const err = new Error('Overconstrained');
+        err.name = 'OverconstrainedError';
+        throw err;
+      }
+      return getUserMediaCount <= 3 ? firstFrontStream : recoveredLiveStream;
+    },
+  });
+
+  try {
+    const res = await acquireCameraStream('environment', { cooldownMs: 0 });
+    assert.equal(firstFrontStream._track.stopped, true);
+    assert.equal(res.stream, recoveredLiveStream);
+    assert.equal(recoveredLiveStream._track.stopped, false);
+  } finally {
+    restore();
+  }
+});

@@ -391,16 +391,21 @@ export async function acquireCameraStream(
           return correctedOutcome.result;
         }
       } catch {
-        // Re-open with bare ideal fallback if exact deviceId failed unexpectedly
-        const recovery = await tryAttempts(
-          [{ strict: false, constraints: { video: true, audio: false } }],
-          preferredFacingMode,
-          previousDeviceId
-        );
-        if (recovery.result) {
-          return recovery.result;
-        }
+        // Fall through to recovery below so we never return the already-stopped stream
       }
+
+      // Always re-acquire a live stream if exact deviceId returned null or threw
+      const recovery = await tryAttempts(
+        [{ strict: false, constraints: { video: true, audio: false } }],
+        preferredFacingMode,
+        previousDeviceId
+      );
+      if (recovery.result) {
+        return recovery.result;
+      }
+      throw recovery.lastError instanceof Error
+        ? recovery.lastError
+        : new Error('Unable to recover camera stream after lens switch.');
     }
   }
 
