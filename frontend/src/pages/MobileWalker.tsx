@@ -4,7 +4,9 @@ import {
   CameraOff,
   ChevronDown,
   ChevronUp,
+  Eye,
   Film,
+  Flashlight,
   Lock,
   Maximize2,
   Minimize2,
@@ -164,6 +166,8 @@ export function MobileWalker() {
   const [voiceLang, setVoiceLang] = useState<VoiceLang>('en');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [sceneCaption, setSceneCaption] = useState<string | null>(null);
   const [approachingAlert, setApproachingAlert] = useState<{ label: string; distM: number; speedMps: number } | null>(null);
   const [devOpen, setDevOpen] = useState(false);
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);
@@ -260,6 +264,70 @@ export function MobileWalker() {
       }
     }
   }, [isFullscreen]);
+
+  const toggleTorch = useCallback(async () => {
+    hapticsRef.current?.triggerTapFeedback();
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    const next = !torchOn;
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: next } as unknown as MediaTrackConstraintSet],
+      });
+      setTorchOn(next);
+    } catch {
+      setSceneCaption('Flashlight not supported on this lens.');
+      window.setTimeout(() => setSceneCaption(null), 2500);
+    }
+  }, [torchOn]);
+
+  const describeSceneEnglish = useCallback(() => {
+    audioRef.current?.unlock();
+    hapticsRef.current?.triggerTapFeedback();
+    if (!guidance) {
+      const msg = 'No camera frame yet. Start the walking stream first.';
+      setSceneCaption(msg);
+      window.setTimeout(() => setSceneCaption(null), 3000);
+      return;
+    }
+    const parts: string[] = [];
+    if (guidance.curb?.detected) {
+      parts.push(guidance.curb.stairs_likely ? 'Stairs detected ahead' : 'Curb or step down ahead');
+    } else if (guidance.wall_override) {
+      parts.push(`Wall or door close ahead at ${guidance.center.min_distance_m.toFixed(1)} meters`);
+    }
+    const objs = (guidance.objects ?? []).slice(0, 3);
+    if (objs.length > 0) {
+      const desc = objs.map((o) => {
+        const where = o.corridor === 'center' ? 'ahead' : `on the ${o.corridor}`;
+        return `${o.label} ${where} at ${o.distance_m.toFixed(1)} meters`;
+      });
+      parts.push(desc.join(', '));
+    }
+    if (guidance.steering === 'CLEAR') {
+      parts.push('Path is clear ahead.');
+    } else if (guidance.steering === 'VEER_LEFT') {
+      parts.push('Left side is clearer.');
+    } else if (guidance.steering === 'VEER_RIGHT') {
+      parts.push('Right side is clearer.');
+    } else if (guidance.steering === 'STOP') {
+      parts.push('Path blocked ahead, stop.');
+    }
+    const sentence = parts.length > 0 ? parts.join('. ') : guidance.spoken_cue;
+    setSceneCaption(sentence);
+    window.setTimeout(() => setSceneCaption(null), 4000);
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(sentence);
+        u.lang = 'en-US';
+        u.rate = 1.08;
+        window.speechSynthesis.speak(u);
+      } catch {
+        // Ignore speech synthesis errors on restricted WebViews
+      }
+    }
+  }, [guidance]);
 
   useEffect(() => {
     audioRef.current?.setVoiceLang(voiceLang);
@@ -1549,9 +1617,7 @@ export function MobileWalker() {
                   </div>
                   {approachingAlert && (
                     <div className="inline-flex w-fit items-center gap-1.5 rounded-full border border-red-400 bg-red-600/90 px-3 py-1 text-xs font-black uppercase tracking-wide text-white shadow-lg">
-                      {voiceLang === 'ru'
-                        ? `⚡ ПРИБЛИЖАЕТСЯ: ${approachingAlert.label} (~${approachingAlert.distM.toFixed(1)}м, ${approachingAlert.speedMps}м/с)`
-                        : `⚡ APPROACHING: ${approachingAlert.label} (~${approachingAlert.distM.toFixed(1)}m, ${approachingAlert.speedMps}m/s)`}
+                      {`⚡ APPROACHING: ${approachingAlert.label} (~${approachingAlert.distM.toFixed(1)}m, ${approachingAlert.speedMps}m/s)`}
                     </div>
                   )}
                   {guidance?.objects && guidance.objects.length > 0 && (
@@ -1568,6 +1634,27 @@ export function MobileWalker() {
                   )}
                 </div>
                 <div className="pointer-events-auto flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label="Describe scene"
+                    onClick={describeSceneEnglish}
+                    className="flex items-center gap-1 rounded-xl border border-sky-400/70 bg-sky-950/80 px-2.5 py-2 text-xs font-bold text-sky-100 backdrop-blur hover:bg-sky-900/80"
+                  >
+                    <Eye className="h-4 w-4" aria-hidden="true" />
+                    <span className="hidden sm:inline">Describe</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
+                    onClick={() => void toggleTorch()}
+                    className={`flex items-center justify-center rounded-xl border px-2.5 py-2 text-xs font-bold backdrop-blur ${
+                      torchOn
+                        ? 'border-amber-300 bg-amber-500/85 text-slate-950'
+                        : 'border-white/25 bg-black/75 text-slate-200'
+                    }`}
+                  >
+                    <Flashlight className="h-4 w-4" aria-hidden="true" />
+                  </button>
                   <button
                     type="button"
                     aria-label={voiceOn ? 'Mute voice' : 'Enable voice'}
@@ -1590,17 +1677,6 @@ export function MobileWalker() {
                   </button>
                   <button
                     type="button"
-                    aria-label="Toggle voice language"
-                    onClick={() => {
-                      hapticsRef.current?.triggerTapFeedback();
-                      setVoiceLang((l) => (l === 'en' ? 'ru' : 'en'));
-                    }}
-                    className="rounded-xl border border-white/25 bg-black/75 px-2.5 py-2 text-xs font-black uppercase text-sky-200 backdrop-blur hover:bg-slate-800"
-                  >
-                    {voiceLang}
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => void toggleFullscreen()}
                     className="flex items-center gap-1 rounded-xl border border-white/30 bg-black/75 px-3 py-2 text-xs font-bold text-white backdrop-blur hover:bg-slate-800"
                   >
@@ -1610,8 +1686,13 @@ export function MobileWalker() {
                 </div>
               </div>
 
-              {/* Bottom HUD: big steering banner + L/C/R distances */}
+              {/* Bottom HUD: scene narration caption + big steering banner + L/C/R distances */}
               <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-4 pb-6">
+                {sceneCaption && (
+                  <div className="rounded-xl border border-sky-400/60 bg-slate-950/90 px-3.5 py-2 text-center text-xs font-semibold text-sky-100 backdrop-blur">
+                    {sceneCaption}
+                  </div>
+                )}
                 <div className={`rounded-2xl border-2 px-4 py-3 text-center backdrop-blur ${meta.bg} ${meta.border}`}>
                   <div className="text-2xl font-black tracking-tight">{meta.title}</div>
                   <div className="mt-0.5 text-sm font-semibold opacity-95">
