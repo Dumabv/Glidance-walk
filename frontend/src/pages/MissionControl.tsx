@@ -37,9 +37,30 @@ const SEVERITY_BADGE: Record<Severity, string> = {
   danger: 'bg-red-500/25 text-red-200 border-red-500/60',
 };
 
+const LOOPBACK_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  '[::1]',
+  '0.0.0.0',
+]);
+
 function getInitialStageMode(): boolean {
   if (typeof window === 'undefined') return false;
   return new URLSearchParams(window.location.search).get('stage') === '1';
+}
+
+function getBrowserOriginMobileUrl(): { url: string; isDomain: boolean } | null {
+  if (typeof window === 'undefined') return null;
+  const { hostname, origin } = window.location;
+  if (!hostname || LOOPBACK_HOSTS.has(hostname.toLowerCase())) {
+    return null;
+  }
+  const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
+  return {
+    url: `${origin}/?mode=mobile`,
+    isDomain: !isIpv4,
+  };
 }
 
 export function MissionControl() {
@@ -251,6 +272,11 @@ export function MissionControl() {
       : 0;
 
   const detectedCount = guidance?.objects?.length ?? 0;
+  const browserOriginMobile = getBrowserOriginMobileUrl();
+  const mobileQrUrl = browserOriginMobile?.url ?? networkInfo?.mobile_url ?? null;
+  const qrCaption = browserOriginMobile?.isDomain
+    ? 'Scan on Phone (Any Network / 4G / Wi-Fi)'
+    : 'Scan on Phone (Same Wi-Fi / Hotspot)';
 
   if (stageMode) {
     return (
@@ -297,20 +323,20 @@ export function MissionControl() {
               />
             ) : (
               <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-700 bg-slate-950/75 p-4 text-center">
-                {networkInfo ? (
+                {mobileQrUrl ? (
                   <>
                     <div className="rounded-2xl bg-white p-3.5 shadow-lg">
                       <QRCodeSVG
-                        value={networkInfo.mobile_url}
+                        value={mobileQrUrl}
                         size={180}
                         level="M"
                       />
                     </div>
                     <p className="text-sm font-medium text-slate-200">
-                      Scan on Phone (Same Wi-Fi / Hotspot)
+                      {qrCaption}
                     </p>
-                    <code className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-sky-300">
-                      {networkInfo.mobile_url}
+                    <code className="max-w-full break-all rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-sky-300">
+                      {mobileQrUrl}
                     </code>
                   </>
                 ) : (
@@ -616,20 +642,20 @@ export function MissionControl() {
             />
           ) : (
             <div className="flex aspect-[4/3] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-slate-700 bg-slate-950/70 p-4 text-center">
-              {networkInfo ? (
+              {mobileQrUrl ? (
                 <>
                   <div className="rounded-xl bg-white p-2.5">
                     <QRCodeSVG
-                      value={networkInfo.mobile_url}
+                      value={mobileQrUrl}
                       size={132}
                       level="M"
                     />
                   </div>
                   <p className="text-xs text-slate-300">
-                    Scan on Android/iPhone (same Wi-Fi or Hotspot):
+                    {qrCaption}:
                   </p>
-                  <code className="rounded bg-slate-900 px-2 py-1 text-[11px] text-sky-300">
-                    {networkInfo.mobile_url}
+                  <code className="max-w-full break-all rounded bg-slate-900 px-2 py-1 text-[11px] text-sky-300">
+                    {mobileQrUrl}
                   </code>
                 </>
               ) : (
