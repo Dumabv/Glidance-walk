@@ -925,8 +925,10 @@ def fuse_yolo_with_verified_hazard(
     )
     overhead_hazard = haz.overhead_hazard and not has_close_person
 
-    # Re-run Lean-4 verified decision core whenever YOLO upgrades severity or suppresses a false curb
-    if upgraded and not overhead_hazard and not haz.wall_override:
+    # Re-run Lean-4 verified decision core whenever YOLO upgrades severity or suppresses a false curb.
+    # ALWAYS re-run even on wall_override so overall_severity == max(L,C,R,curb) & never-steer-into-danger hold!
+    spoken = haz.spoken_cue
+    if upgraded:
         ov_code, act_code = decide_guidance_verified(
             _SEV_TO_CODE[left_z.severity],
             int(round(left_z.obstacle_score * 1000)),
@@ -938,7 +940,12 @@ def fuse_yolo_with_verified_hazard(
             True,
         )
         overall_sev = SEVERITY_BY_CODE[ov_code]
-        steering = STEERING_BY_CODE[act_code]
+        if not overhead_hazard:
+            steering = STEERING_BY_CODE[act_code]
+        elif act_code == 3:
+            steering = "STOP"
+            if spoken == "Path clear.":
+                spoken = CUE_BY_CODE[14]
 
     # Enrich spoken_cue with the nearest named object and GUARANTEE non-CLEAR steering never says "Path clear."
     # If depth already flagged a corridor (steering != CLEAR), fall back to confident YOLO objects in that corridor
@@ -953,7 +960,6 @@ def fuse_yolo_with_verified_hazard(
     l_named = l_obj or _best_corridor_obj("left")
     r_named = r_obj or _best_corridor_obj("right")
 
-    spoken = haz.spoken_cue
     if curb.detected and visual_step is not None and not overhead_hazard:
         eff_dist = min(visual_step.distance_m, center_z.min_distance_m)
         if visual_step.label == "stairs" or curb.stairs_likely:
@@ -1009,101 +1015,45 @@ def fuse_yolo_with_verified_hazard(
     )
 
 
-def fuse_close_range_metric_depth(
-    haz: HazardResult,
-    depth_meters: np.ndarray,
-    pitch_deg: float = 0.0,
-    config: CalibrationConfig | None = None,
-) -> HazardResult:
-    """Escalates close-range mid-body obstacles (e.g., desks/walls at <=1.15m) using metric depth.
-
-    Ignores steep downward tilts (`0 < pitch_deg < 50`) so shoes and near floor never false-alarm,
-    and preserves Lean 4 safety invariants via `decide_guidance_verified`.
-    """
-    if haz.lens_blocked or haz.curb.detected or haz.wall_override:
-        return haz
-    if pitch_deg != 0.0 and 0.0 < pitch_deg < 50.0:
-        return haz
-
-    cfg = config or CalibrationConfig()
-    h, w = depth_meters.shape[:2]
-    if h < 16 or w < 16:
-        return haz
-
-    y1 = int(h * 0.22)
-    y2 = int(h * 0.68)
-    x1 = w // 3
-    x2 = (2 * w) // 3
-    bands: tuple[tuple[Corridor, np.ndarray], ...] = (
-        ("left", depth_meters[y1:y2, 0:x1]),
-        ("center", depth_meters[y1:y2, x1:x2]),
-        ("right", depth_meters[y1:y2, x2:w]),
-    )
-
-    zones: dict[Corridor, ZoneMetrics] = {
-        "left": haz.left,
-        "center": haz.center,
-        "right": haz.right,
-    }
-    upgraded = False
-    for side, patch in bands:
-        if patch.size == 0:
-            continue
-        q20_m = float(np.percentile(patch, 20.0))
-        if not np.isfinite(q20_m):
-            continue
-        z = zones[side]
-        target_sev: Severity = z.severity
-        new_score = z.obstacle_score
-        if q20_m <= 1.15:
-            target_sev = "danger"
-            new_score = max(new_score, min(1.0, cfg.danger_threshold + 0.14))
-        elif q20_m <= 1.75 and _SEV_TO_CODE[z.severity] < 1:
-            target_sev = "caution"
-            new_score = max(new_score, min(1.0, cfg.caution_threshold + 0.06))
-
-        if _SEV_TO_CODE[target_sev] > _SEV_TO_CODE[z.severity] or q20_m < z.min_distance_m:
-            if _SEV_TO_CODE[target_sev] > _SEV_TO_CODE[z.severity]:
-                upgraded = True
-            zones[side] = ZoneMetrics(
-                severity=target_sev,
-                obstacle_score=round(new_score, 4),
-                min_distance_m=round(min(z.min_distance_m, max(0.25, q20_m)), 2),
-                coverage_ratio=z.coverage_ratio,
-            )
-
-    if not upgraded:
-        return haz
-
-    left_z, center_z, right_z = zones["left"], zones["center"], zones["right"]
-    ov_code, act_code = decide_guidance_verified(
-        _SEV_TO_CODE[left_z.severity],
-        int(round(left_z.obstacle_score * 1000)),
-        _SEV_TO_CODE[center_z.severity],
-        int(round(center_z.obstacle_score * 1000)),
-        _SEV_TO_CODE[right_z.severity],
-        int(round(right_z.obstacle_score * 1000)),
-        haz.curb.detected,
-        True,
-    )
-    overall_sev = SEVERITY_BY_CODE[ov_code]
-    steering = STEERING_BY_CODE[act_code]
-    cue_map = {0: 0, 1: 3, 2: 4, 3: 5, 4: 1}
-    spoken = haz.spoken_cue
-    if steering != haz.steering or spoken == "Path clear.":
-        spoken = CUE_BY_CODE[cue_map[act_code]]
-
-    return replace(
-        haz,
-        overall_severity=overall_sev,
-        steering=steering,
-        spoken_cue=spoken,
-        left=left_z,
-        center=center_z,
-        right=right_z,
-    )
 METRIC_CLOSE_DANGER_M = 1.05
 METRIC_CLOSE_CAUTION_M = 1.45
+PLANAR_WALL_MAX_DIST_M = 1.90
+PLANAR_WALL_MAX_VERT_DIFF_M = 0.15
+PLANAR_WALL_MAX_HORIZ_SPREAD_M = 0.35
+
+
+def _detect_vertical_wall_barrier(
+    depth_meters: np.ndarray,
+) -> tuple[bool, float, float, float]:
+    """Detects a close flat vertical wall across L/C/R using projective 3D depth geometry.
+
+    On an open hallway floor, the top of the frame recedes far away (`d_top - d_bot >= +0.45m`).
+    On a vertical wall ahead (level or slightly tilted down), depth is flat or inverted
+    (`d_top - d_bot <= +0.15m`) and horizontally uniform across left, center, and right corridors.
+    Far walls (`> 1.90m`, e.g. 3.5m+) are ignored so empty rooms never false-alarm.
+    """
+    h, w = depth_meters.shape
+    d_top = float(np.median(depth_meters[(h * 12) // 100 : (h * 35) // 100, :]))
+    d_mid = float(np.median(depth_meters[(h * 35) // 100 : (h * 62) // 100, :]))
+    d_bot = float(np.median(depth_meters[(h * 65) // 100 : (h * 88) // 100, :]))
+    if not (np.isfinite(d_top) and np.isfinite(d_mid) and np.isfinite(d_bot)):
+        return False, 10.0, 10.0, 10.0
+
+    wb = depth_meters[(h * 15) // 100 : (h * 65) // 100, :]
+    x1, x2 = w // 3, (2 * w) // 3
+    dl = float(np.clip(np.median(wb[:, 0:x1]), 0.25, 10.0))
+    dc = float(np.clip(np.median(wb[:, x1:x2]), 0.25, 10.0))
+    dr = float(np.clip(np.median(wb[:, x2:w]), 0.25, 10.0))
+
+    vert_diff = d_top - d_bot
+    h_spread = max(dl, dc, dr) - min(dl, dc, dr)
+    is_wall = (
+        vert_diff <= PLANAR_WALL_MAX_VERT_DIFF_M
+        and h_spread <= PLANAR_WALL_MAX_HORIZ_SPREAD_M
+        and d_mid <= PLANAR_WALL_MAX_DIST_M
+        and max(dl, dc, dr) <= PLANAR_WALL_MAX_DIST_M + 0.25
+    )
+    return is_wall, dl, dc, dr
 
 
 def fuse_close_range_metric_depth(
@@ -1112,11 +1062,12 @@ def fuse_close_range_metric_depth(
     pitch_deg: float,
     config: CalibrationConfig,
 ) -> HazardResult:
-    """Anchors corridor distances & close-range solid obstacles to real metric depth.
+    """Anchors corridor distances, vertical blank walls & close solid obstacles to real metric depth.
 
     Samples the forward body-level band (`y = 24%..60%`) per corridor so flat floors below
-    do not trigger false alarms, while close desks, doors, walls, or chairs (`<= 1.05m`)
-    reliably escalate through Lean-4 verified `decide_guidance_verified`.
+    do not trigger false alarms, detects uniform vertical walls (`<= 1.90m`) via inverted/flat
+    vertical depth gradient (`d_top <= d_bot + 0.15m`), and routes all escalations through
+    Lean-4 verified `decide_guidance_verified`.
     """
     if depth_meters is None or haz.lens_blocked:
         return haz
@@ -1128,6 +1079,47 @@ def fuse_close_range_metric_depth(
     h, w = depth_meters.shape
     if h < 16 or w < 16:
         return haz
+
+    # 1. Planar vertical wall barrier check (catches blank matte walls with visible floor/baseboard
+    #    that defeat positive-slope floor priors or trigger asymmetric shadow `VEER_RIGHT`).
+    is_wall, wall_l, wall_c, wall_r = _detect_vertical_wall_barrier(depth_meters)
+    if is_wall and not haz.curb.detected:
+        wall_score = round(min(1.0, max(config.danger_threshold + 0.20, 0.85)), 4)
+        left_z = ZoneMetrics(
+            severity="danger",
+            obstacle_score=max(haz.left.obstacle_score, wall_score),
+            min_distance_m=round(min(haz.left.min_distance_m, wall_l), 2),
+            coverage_ratio=max(haz.left.coverage_ratio, 0.9),
+        )
+        center_z = ZoneMetrics(
+            severity="danger",
+            obstacle_score=max(haz.center.obstacle_score, wall_score),
+            min_distance_m=round(min(haz.center.min_distance_m, wall_c), 2),
+            coverage_ratio=max(haz.center.coverage_ratio, 0.9),
+        )
+        right_z = ZoneMetrics(
+            severity="danger",
+            obstacle_score=max(haz.right.obstacle_score, wall_score),
+            min_distance_m=round(min(haz.right.min_distance_m, wall_r), 2),
+            coverage_ratio=max(haz.right.coverage_ratio, 0.9),
+        )
+        ov_code, act_code = decide_guidance_verified(
+            2, int(round(left_z.obstacle_score * 1000)),
+            2, int(round(center_z.obstacle_score * 1000)),
+            2, int(round(right_z.obstacle_score * 1000)),
+            False,
+            True,
+        )
+        return replace(
+            haz,
+            overall_severity=SEVERITY_BY_CODE[ov_code],
+            steering=STEERING_BY_CODE[act_code],
+            spoken_cue=f"Wall ahead at {wall_c:.1f}m. Stop.",
+            left=left_z,
+            center=center_z,
+            right=right_z,
+            wall_override=True,
+        )
 
     y0 = (h * 24) // 100
     y1 = max(y0 + 4, (h * 60) // 100)
@@ -1176,7 +1168,9 @@ def fuse_close_range_metric_depth(
     steering = haz.steering
     spoken = haz.spoken_cue
 
-    if upgraded and not haz.overhead_hazard and not haz.wall_override:
+    # Always re-run Lean-4 verified decision core whenever any corridor severity escalated
+    # so `overall_severity == max(L,C,R,curb)` and `never-steer-into-danger` hold even on wall_override.
+    if upgraded:
         ov_code, act_code = decide_guidance_verified(
             _SEV_TO_CODE[left_z.severity],
             int(round(left_z.obstacle_score * 1000)),
@@ -1188,16 +1182,21 @@ def fuse_close_range_metric_depth(
             True,
         )
         overall_sev = SEVERITY_BY_CODE[ov_code]
-        steering = STEERING_BY_CODE[act_code]
-        if not haz.curb.detected:
-            if steering == "STOP":
-                spoken = f"Close obstacle at {center_z.min_distance_m:.1f}m. Stop."
-            elif steering == "VEER_LEFT":
-                d_obs = min(center_z.min_distance_m, right_z.min_distance_m)
-                spoken = f"Close obstacle at {d_obs:.1f}m. Step left."
-            elif steering == "VEER_RIGHT":
-                d_obs = min(center_z.min_distance_m, left_z.min_distance_m)
-                spoken = f"Close obstacle at {d_obs:.1f}m. Step right."
+        if not haz.overhead_hazard:
+            steering = STEERING_BY_CODE[act_code]
+            if not haz.curb.detected:
+                if steering == "STOP":
+                    spoken = f"Close obstacle at {center_z.min_distance_m:.1f}m. Stop."
+                elif steering == "VEER_LEFT":
+                    d_obs = min(center_z.min_distance_m, right_z.min_distance_m)
+                    spoken = f"Close obstacle at {d_obs:.1f}m. Step left."
+                elif steering == "VEER_RIGHT":
+                    d_obs = min(center_z.min_distance_m, left_z.min_distance_m)
+                    spoken = f"Close obstacle at {d_obs:.1f}m. Step right."
+        elif act_code == 3:
+            steering = "STOP"
+            if spoken == "Path clear.":
+                spoken = CUE_BY_CODE[14]
 
     return replace(
         haz,
@@ -1294,3 +1293,83 @@ def detect_close_flat_wall_or_door(
     if detector is not None and stateful:
         detector._flat_wall_streak = 0
     return haz, None
+
+
+def fuse_relative_planar_wall(
+    haz: HazardResult,
+    closeness: np.ndarray,
+    pitch_deg: float,
+    config: CalibrationConfig,
+) -> HazardResult:
+    """Detects blank vertical walls on relative depth models (e.g. Depth-Anything-V2-Large-FP16 ONNX).
+
+    On relative models normalized via `[p2, p98]`, an open hallway floor has strongly negative
+    `c_top - c_bot` (`-0.30` to `-0.70`, bottom much closer than top). A blank vertical wall with
+    visible baseboard/floor flips the slope (`c_top - c_bot >= +0.22`) while staying horizontally
+    uniform across L/C/R (`h_spread <= 0.14`). A straight-on close wall produces uniform high
+    closeness (`>= 0.70`) top-to-bottom.
+    """
+    if haz.lens_blocked or haz.curb.detected or haz.wall_override:
+        return haz
+
+    has_live_imu = bool(np.isfinite(pitch_deg) and abs(pitch_deg) > 1.0)
+    if has_live_imu and (pitch_deg < 45.0 or pitch_deg > 115.0):
+        return haz
+
+    h, w = closeness.shape[:2]
+    if h < 16 or w < 16:
+        return haz
+
+    c_top = float(np.median(closeness[(h * 12) // 100 : (h * 35) // 100, :]))
+    c_bot = float(np.median(closeness[(h * 65) // 100 : (h * 88) // 100, :]))
+    if not (np.isfinite(c_top) and np.isfinite(c_bot)):
+        return haz
+
+    wb = closeness[(h * 15) // 100 : (h * 65) // 100, :]
+    x1, x2 = w // 3, (2 * w) // 3
+    cl_l = float(np.median(wb[:, 0:x1]))
+    cl_c = float(np.median(wb[:, x1:x2]))
+    cl_r = float(np.median(wb[:, x2:w]))
+    h_spread = max(cl_l, cl_c, cl_r) - min(cl_l, cl_c, cl_r)
+
+    inverted_wall = (c_top - c_bot) >= 0.22 and c_top >= 0.45 and h_spread <= 0.14
+    flat_close_wall = c_top >= 0.70 and c_bot >= 0.70 and abs(c_top - c_bot) <= 0.15 and h_spread <= 0.12
+    if not (inverted_wall or flat_close_wall):
+        return haz
+
+    wall_score = round(min(1.0, max(config.danger_threshold + 0.20, 0.85)), 4)
+    left_z = ZoneMetrics(
+        severity="danger",
+        obstacle_score=max(haz.left.obstacle_score, wall_score),
+        min_distance_m=round(min(haz.left.min_distance_m, 1.0), 2),
+        coverage_ratio=max(haz.left.coverage_ratio, 0.9),
+    )
+    center_z = ZoneMetrics(
+        severity="danger",
+        obstacle_score=max(haz.center.obstacle_score, wall_score),
+        min_distance_m=round(min(haz.center.min_distance_m, 1.0), 2),
+        coverage_ratio=max(haz.center.coverage_ratio, 0.9),
+    )
+    right_z = ZoneMetrics(
+        severity="danger",
+        obstacle_score=max(haz.right.obstacle_score, wall_score),
+        min_distance_m=round(min(haz.right.min_distance_m, 1.0), 2),
+        coverage_ratio=max(haz.right.coverage_ratio, 0.9),
+    )
+    ov_code, act_code = decide_guidance_verified(
+        2, int(round(left_z.obstacle_score * 1000)),
+        2, int(round(center_z.obstacle_score * 1000)),
+        2, int(round(right_z.obstacle_score * 1000)),
+        False,
+        True,
+    )
+    return replace(
+        haz,
+        overall_severity=SEVERITY_BY_CODE[ov_code],
+        steering=STEERING_BY_CODE[act_code],
+        spoken_cue="Wall ahead. Stop.",
+        left=left_z,
+        center=center_z,
+        right=right_z,
+        wall_override=True,
+    )

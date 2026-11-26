@@ -36,6 +36,7 @@ from backend.vision.hazard_detector import (
     GroundAwareHazardDetector,
     detect_close_flat_wall_or_door,
     fuse_close_range_metric_depth,
+    fuse_relative_planar_wall,
     fuse_yolo_with_verified_hazard,
 )
 from backend.vision.object_detector import SemanticObjectDetector
@@ -365,6 +366,8 @@ def _process_frame_critical_path(
     depth_m = pred.depth_meters
     if engine._is_metric_model and not engine.use_mock and depth_m is not None:
         haz = fuse_close_range_metric_depth(haz, depth_m, pitch_deg, detector.config)
+    elif not engine.use_mock:
+        haz = fuse_relative_planar_wall(haz, pred.closeness, pitch_deg, detector.config)
     if yolo_fut is not None and depth_m is not None:
         raw_boxes, yolo_ms = yolo_fut.result()
         raw_objects = obj_detector.attach_depth(raw_boxes, depth_m)

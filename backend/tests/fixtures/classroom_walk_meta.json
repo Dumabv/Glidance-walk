@@ -1,0 +1,3252 @@
+{
+  "trace_name": "classroom_walk",
+  "source_video": "IMG_7723.MOV",
+  "source_fps": 30.0,
+  "stride": 6,
+  "frame_count": 357,
+  "duration_sec": 71.21,
+  "trace_shape_hw": [
+    128,
+    72
+  ],
+  "depth_model": "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
+  "is_metric_model": true,
+  "yolo_active": true,
+  "scenarios": [
+    {
+      "id": "desk-start-no-laptop-clutter",
+      "start_sec": 0.6,
+      "end_sec": 2.0,
+      "title": "Close desk at start (ignore tabletop laptop clutter)",
+      "description": "Walker faces desk ~0.9m ahead with laptop on right. Must STOP for solid desk, never trigger tabletop 'laptop' alerts or say 'Path clear.'",
+      "require_any_steering": [
+        "STOP"
+      ],
+      "forbid_cue_substrings": [
+        "laptop",
+        "path clear"
+      ]
+    },
+    {
+      "id": "clear-corridor-floor",
+      "start_sec": 19.2,
+      "end_sec": 20.0,
+      "title": "Clear wooden hallway floor (glass wall on far left)",
+      "description": "Open aisle between classroom rows. Must stay CLEAR with zero false danger or curb alarms.",
+      "require_any_steering": [
+        "CLEAR"
+      ],
+      "forbid_steering": [
+        "STOP",
+        "CURB_DROP"
+      ],
+      "max_danger_ratio": 0.0
+    },
+    {
+      "id": "right-office-chair-evade",
+      "start_sec": 21.8,
+      "end_sec": 23.0,
+      "title": "Office chair protruding on right (0.4-0.6m)",
+      "description": "Close chair on right side of aisle. Must steer VEER_LEFT, never veer right into the chair or trigger false curb.",
+      "require_any_steering": [
+        "VEER_LEFT"
+      ],
+      "forbid_steering": [
+        "VEER_RIGHT",
+        "CURB_DROP"
+      ],
+      "require_min_severity": "danger"
+    },
+    {
+      "id": "classroom-chair-desk-caution",
+      "start_sec": 31.0,
+      "end_sec": 32.4,
+      "title": "Classroom chairs & desk ahead/left (1.4-2.0m)",
+      "description": "Approaching chairs along classroom aisle. Must identify chair obstacle and steer around cleanly without false curb.",
+      "require_any_steering": [
+        "VEER_LEFT",
+        "VEER_RIGHT"
+      ],
+      "forbid_steering": [
+        "CURB_DROP"
+      ],
+      "require_cue_substrings_any": [
+        "chair"
+      ]
+    },
+    {
+      "id": "close-person-center-stop",
+      "start_sec": 37.2,
+      "end_sec": 38.0,
+      "title": "Close person (0.5m) blocking center aisle",
+      "description": "Person standing directly ahead at 0.5m. Must STOP and identify person rather than mislabeling as 'Low overhead obstacle'.",
+      "require_any_steering": [
+        "STOP"
+      ],
+      "forbid_cue_substrings": [
+        "path clear",
+        "low overhead"
+      ],
+      "require_cue_substrings_any": [
+        "person"
+      ]
+    },
+    {
+      "id": "chair-jacket-no-false-curb",
+      "start_sec": 49.6,
+      "end_sec": 50.8,
+      "title": "Chair backrest & jacket on right (no false curb)",
+      "description": "Passing close chair backrest and black jacket on right. Must steer VEER_LEFT around obstacle and never fire false CURB_DROP.",
+      "require_any_steering": [
+        "VEER_LEFT"
+      ],
+      "forbid_steering": [
+        "CURB_DROP"
+      ],
+      "forbid_cue_substrings": [
+        "curb",
+        "step down"
+      ]
+    },
+    {
+      "id": "narrow-two-people-stop",
+      "start_sec": 57.4,
+      "end_sec": 58.0,
+      "title": "Two people closing in on left & right (narrow gap)",
+      "description": "People on both sides at ~1.1m leaving no safe veer side. Must STOP and announce narrow gap (never 'Path clear.').",
+      "require_any_steering": [
+        "STOP"
+      ],
+      "forbid_cue_substrings": [
+        "path clear"
+      ],
+      "require_cue_substrings_any": [
+        "narrow gap",
+        "person"
+      ]
+    }
+  ],
+  "objects_per_frame": [
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.456,
+        "distance_m": 1.02,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0989,
+          0.6708,
+          0.9945,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.585,
+        "distance_m": 1.0,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1264,
+          0.6335,
+          0.7912,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.507,
+        "distance_m": 0.99,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.4615,
+          0.5248
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.51,
+        "distance_m": 0.99,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.489,
+          0.5497
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.648,
+        "distance_m": 0.92,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.5165,
+          0.5497
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.689,
+        "distance_m": 0.94,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.5659,
+          0.5497
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.778,
+        "distance_m": 1.07,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.6264,
+          0.5621
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.785,
+        "distance_m": 1.17,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.7637,
+          0.5963
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.652,
+        "distance_m": 0.96,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.9725,
+          0.6304
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.389,
+        "distance_m": 0.91,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.9835,
+          0.6366
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.485,
+        "distance_m": 0.95,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0934,
+          0.0031,
+          1.0,
+          0.6863
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.609,
+        "distance_m": 0.93,
+        "corridor": "center",
+        "bbox_norm": [
+          0.011,
+          0.0031,
+          0.9945,
+          0.9814
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.654,
+        "distance_m": 1.18,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          1.0,
+          0.9783
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.545,
+        "distance_m": 1.28,
+        "corridor": "center",
+        "bbox_norm": [
+          0.011,
+          0.0031,
+          1.0,
+          0.972
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.524,
+        "distance_m": 1.3,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1429,
+          0.0031,
+          1.0,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.512,
+        "distance_m": 1.1,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2088,
+          0.0031,
+          1.0,
+          0.9845
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.428,
+        "distance_m": 1.28,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2637,
+          0.0031,
+          1.0,
+          0.9845
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.446,
+        "distance_m": 1.28,
+        "corridor": "right",
+        "bbox_norm": [
+          0.3791,
+          0.0031,
+          1.0,
+          0.9814
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.576,
+        "distance_m": 2.01,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.9945,
+          0.9938
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.627,
+        "distance_m": 2.01,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0062,
+          0.9945,
+          0.9938
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.502,
+        "distance_m": 1.95,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          1.0,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.448,
+        "distance_m": 1.52,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3462,
+          0.0031,
+          0.9615,
+          0.5497
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.595,
+        "distance_m": 1.5,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3132,
+          0.0,
+          0.989,
+          0.5932
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.788,
+        "distance_m": 1.33,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.877,
+        "distance_m": 1.37,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.85,
+        "distance_m": 1.23,
+        "corridor": "center",
+        "bbox_norm": [
+          0.011,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.788,
+        "distance_m": 1.31,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0165,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.895,
+        "distance_m": 1.26,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.827,
+        "distance_m": 1.23,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.9945,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.728,
+        "distance_m": 1.15,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.5879,
+          0.8789
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.517,
+        "distance_m": 1.36,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.478,
+          0.8696
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.385,
+        "distance_m": 0.63,
+        "corridor": "right",
+        "bbox_norm": [
+          0.522,
+          0.0093,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.413,
+        "distance_m": 0.9,
+        "corridor": "right",
+        "bbox_norm": [
+          0.467,
+          0.0248,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.56,
+        "distance_m": 2.82,
+        "corridor": "right",
+        "bbox_norm": [
+          0.7912,
+          0.0528,
+          1.0,
+          0.323
+        ],
+        "severity": "clear"
+      }
+    ],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.385,
+        "distance_m": 2.88,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6484,
+          0.1553,
+          0.989,
+          0.5155
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.524,
+        "distance_m": 3.59,
+        "corridor": "right",
+        "bbox_norm": [
+          0.522,
+          0.1584,
+          0.9945,
+          0.5248
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.633,
+        "distance_m": 3.24,
+        "corridor": "right",
+        "bbox_norm": [
+          0.4011,
+          0.1522,
+          0.9615,
+          0.528
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.387,
+        "distance_m": 3.46,
+        "corridor": "right",
+        "bbox_norm": [
+          0.3626,
+          0.0031,
+          1.0,
+          0.2112
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.816,
+        "distance_m": 3.34,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3571,
+          0.1584,
+          0.9011,
+          0.5404
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.456,
+        "distance_m": 3.58,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0776,
+          0.4341,
+          0.4348
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.429,
+        "distance_m": 3.79,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2747,
+          0.0124,
+          1.0,
+          0.2174
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.72,
+        "distance_m": 2.94,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3132,
+          0.1553,
+          0.8736,
+          0.5528
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.505,
+        "distance_m": 3.13,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1978,
+          0.0093,
+          1.0,
+          0.2174
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.416,
+        "distance_m": 2.9,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0528,
+          0.3846,
+          0.4689
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.798,
+        "distance_m": 3.06,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2582,
+          0.1646,
+          0.8462,
+          0.5745
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.496,
+        "distance_m": 3.14,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1429,
+          0.0031,
+          1.0,
+          0.2298
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "dining table",
+        "confidence": 0.396,
+        "distance_m": 2.77,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0769,
+          0.0,
+          1.0,
+          0.5497
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.692,
+        "distance_m": 3.1,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1978,
+          0.1615,
+          0.8297,
+          0.5901
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.441,
+        "distance_m": 3.3,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0879,
+          0.0031,
+          1.0,
+          0.2267
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "dining table",
+        "confidence": 0.474,
+        "distance_m": 2.44,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0275,
+          0.0,
+          1.0,
+          0.5652
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.889,
+        "distance_m": 2.82,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1538,
+          0.1646,
+          0.8187,
+          0.6118
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.41,
+        "distance_m": 2.91,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0385,
+          0.0,
+          1.0,
+          0.2267
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "dining table",
+        "confidence": 0.515,
+        "distance_m": 2.29,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          1.0,
+          0.587
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.537,
+        "distance_m": 2.62,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          1.0,
+          0.2484
+        ],
+        "severity": "clear"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.813,
+        "distance_m": 2.69,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0824,
+          0.1677,
+          0.7967,
+          0.6366
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "dining table",
+        "confidence": 0.483,
+        "distance_m": 1.89,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.6149
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.453,
+        "distance_m": 2.1,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.2578
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.83,
+        "distance_m": 2.26,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.1739,
+          0.7802,
+          0.677
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.855,
+        "distance_m": 1.97,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.1988,
+          0.7527,
+          0.7174
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.846,
+        "distance_m": 1.97,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.2236,
+          0.7363,
+          0.7578
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.834,
+        "distance_m": 2.38,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.3012,
+          0.7363,
+          0.795
+        ],
+        "severity": "clear"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.783,
+        "distance_m": 2.09,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.3416,
+          0.7088,
+          0.8634
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.755,
+        "distance_m": 1.49,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.4037,
+          0.5714,
+          0.9783
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.471,
+        "distance_m": 1.5,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.4627,
+          0.4725,
+          0.9969
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.427,
+        "distance_m": 1.75,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.8626,
+          0.8261
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.414,
+        "distance_m": 1.88,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0062,
+          0.7088,
+          0.8758
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.777,
+        "distance_m": 1.6,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9907
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.765,
+        "distance_m": 1.42,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          1.0,
+          0.9752
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.742,
+        "distance_m": 1.12,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.8846,
+          0.9752
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.549,
+        "distance_m": 1.14,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.2298,
+          1.0,
+          0.9876
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.701,
+        "distance_m": 0.84,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.7912,
+          0.764
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.473,
+        "distance_m": 0.95,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.264,
+          0.9725,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.797,
+        "distance_m": 0.77,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.6868,
+          0.8447
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.754,
+        "distance_m": 0.84,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.2888,
+          0.8681,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.771,
+        "distance_m": 0.86,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.6044,
+          0.8602
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.701,
+        "distance_m": 0.9,
+        "corridor": "center",
+        "bbox_norm": [
+          0.011,
+          0.295,
+          0.7582,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.466,
+        "distance_m": 1.51,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3077,
+          0.0,
+          0.6264,
+          0.2578
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.47,
+        "distance_m": 1.04,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6813,
+          0.0031,
+          1.0,
+          0.4255
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.668,
+        "distance_m": 0.74,
+        "corridor": "right",
+        "bbox_norm": [
+          0.511,
+          0.0031,
+          0.9945,
+          0.4224
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.419,
+        "distance_m": 0.76,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1264,
+          0.0,
+          0.6868,
+          0.3012
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.421,
+        "distance_m": 1.37,
+        "corridor": "right",
+        "bbox_norm": [
+          0.3462,
+          0.0,
+          0.989,
+          0.4224
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.578,
+        "distance_m": 1.6,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.5,
+          0.3043
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "dining table",
+        "confidence": 0.402,
+        "distance_m": 1.1,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2912,
+          0.0,
+          0.9945,
+          0.3354
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.452,
+        "distance_m": 1.14,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0769,
+          0.0,
+          0.9066,
+          0.3665
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.414,
+        "distance_m": 0.84,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.9615,
+          0.9907
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.656,
+        "distance_m": 0.86,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.2547,
+          0.8571,
+          0.9969
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.479,
+        "distance_m": 1.11,
+        "corridor": "center",
+        "bbox_norm": [
+          0.011,
+          0.0,
+          1.0,
+          0.354
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.527,
+        "distance_m": 0.8,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.2919,
+          0.8352,
+          0.9969
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.401,
+        "distance_m": 1.15,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.3758
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.642,
+        "distance_m": 0.83,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.323,
+          0.8791,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.427,
+        "distance_m": 1.22,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          1.0,
+          0.3882
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.521,
+        "distance_m": 0.83,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.3478,
+          0.9176,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.597,
+        "distance_m": 0.81,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.3634,
+          0.9835,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.549,
+        "distance_m": 0.71,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.3665,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "dining table",
+        "confidence": 0.403,
+        "distance_m": 1.25,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.441
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.634,
+        "distance_m": 0.54,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1374,
+          0.0,
+          0.978,
+          0.4938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.571,
+        "distance_m": 0.85,
+        "corridor": "right",
+        "bbox_norm": [
+          0.5769,
+          0.0,
+          1.0,
+          0.3913
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.433,
+        "distance_m": 0.86,
+        "corridor": "left",
+        "bbox_norm": [
+          0.022,
+          0.0,
+          0.3791,
+          0.2609
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.773,
+        "distance_m": 1.5,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9938
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.762,
+        "distance_m": 1.08,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          1.0,
+          0.9876
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.431,
+        "distance_m": 1.23,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.1988,
+          0.5714,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.431,
+        "distance_m": 1.37,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          1.0,
+          0.9938
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.532,
+        "distance_m": 0.9,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.2112,
+          0.5989,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.384,
+        "distance_m": 0.86,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.847,
+        "distance_m": 0.63,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.989,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.882,
+        "distance_m": 1.12,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.671,
+        "distance_m": 1.18,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.476,
+        "distance_m": 1.35,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0549,
+          0.0,
+          0.9945,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.488,
+        "distance_m": 1.43,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0385,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.518,
+        "distance_m": 0.96,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1319,
+          0.0031,
+          0.9945,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.418,
+        "distance_m": 0.76,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2143,
+          0.1925,
+          0.967,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.578,
+        "distance_m": 0.82,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2802,
+          0.2516,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.532,
+        "distance_m": 0.5,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.9945,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.57,
+        "distance_m": 0.73,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.9945,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.468,
+        "distance_m": 0.67,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "suitcase",
+        "confidence": 0.509,
+        "distance_m": 1.26,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.4472,
+          0.5989,
+          0.9348
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.654,
+        "distance_m": 0.62,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          1.0,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.449,
+        "distance_m": 0.66,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.989,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.546,
+        "distance_m": 0.88,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.9945,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.518,
+        "distance_m": 0.61,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2308,
+          0.0,
+          0.9341,
+          0.5683
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.558,
+        "distance_m": 1.09,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1099,
+          0.0,
+          0.9725,
+          0.587
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.632,
+        "distance_m": 1.02,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.8132,
+          0.854
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.688,
+        "distance_m": 0.86,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.7418,
+          0.9099
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.82,
+        "distance_m": 0.9,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.6703,
+          0.9876
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.759,
+        "distance_m": 0.96,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.6264,
+          0.9783
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.389,
+        "distance_m": 1.02,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1319,
+          0.0031,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.503,
+        "distance_m": 1.05,
+        "corridor": "center",
+        "bbox_norm": [
+          0.4396,
+          0.0,
+          0.8077,
+          0.5248
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.792,
+        "distance_m": 1.27,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.5604,
+          0.9876
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "person",
+        "confidence": 0.547,
+        "distance_m": 1.5,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3132,
+          0.0,
+          0.7308,
+          0.5466
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.787,
+        "distance_m": 1.13,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.5,
+          0.9907
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.5,
+        "distance_m": 1.22,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2033,
+          0.0,
+          0.6429,
+          0.5497
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.495,
+        "distance_m": 0.91,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0217,
+          0.3791,
+          0.9907
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.401,
+        "distance_m": 0.94,
+        "corridor": "left",
+        "bbox_norm": [
+          0.011,
+          0.0,
+          0.5,
+          0.5963
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.661,
+        "distance_m": 0.82,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1429,
+          0.0,
+          0.9945,
+          0.9969
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.566,
+        "distance_m": 0.83,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.3077,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.647,
+        "distance_m": 0.85,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.474,
+        "distance_m": 1.12,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1099,
+          0.0,
+          1.0,
+          0.9907
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "backpack",
+        "confidence": 0.475,
+        "distance_m": 1.21,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6154,
+          0.4783,
+          0.9945,
+          0.8447
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "backpack",
+        "confidence": 0.468,
+        "distance_m": 1.58,
+        "corridor": "right",
+        "bbox_norm": [
+          0.5275,
+          0.4907,
+          0.9945,
+          0.8634
+        ],
+        "severity": "caution"
+      }
+    ],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.486,
+        "distance_m": 0.54,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2033,
+          0.0,
+          1.0,
+          0.587
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.419,
+        "distance_m": 0.36,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          1.0,
+          0.972
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.386,
+        "distance_m": 0.66,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.7418,
+          0.6087
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.622,
+        "distance_m": 0.74,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.5879,
+          0.6646
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.58,
+        "distance_m": 0.75,
+        "corridor": "center",
+        "bbox_norm": [
+          0.011,
+          0.3913,
+          0.6648,
+          0.9286
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.389,
+        "distance_m": 0.77,
+        "corridor": "right",
+        "bbox_norm": [
+          0.5385,
+          0.1366,
+          1.0,
+          0.9752
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.609,
+        "distance_m": 0.92,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.4121,
+          0.6832
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.615,
+        "distance_m": 0.82,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2637,
+          0.1429,
+          0.9945,
+          0.9907
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.434,
+        "distance_m": 0.87,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.2253,
+          0.6677
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.709,
+        "distance_m": 0.96,
+        "corridor": "center",
+        "bbox_norm": [
+          0.1044,
+          0.1429,
+          0.956,
+          0.9969
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.411,
+        "distance_m": 1.33,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6703,
+          0.0,
+          1.0,
+          0.618
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.881,
+        "distance_m": 0.94,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.1335,
+          0.8462,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.878,
+        "distance_m": 1.01,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.1429,
+          0.7363,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.579,
+        "distance_m": 1.45,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3791,
+          0.0,
+          0.9231,
+          0.559
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.704,
+        "distance_m": 1.31,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.1863,
+          0.6593,
+          1.0
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.471,
+        "distance_m": 1.76,
+        "corridor": "center",
+        "bbox_norm": [
+          0.2912,
+          0.0,
+          0.8407,
+          0.5901
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.501,
+        "distance_m": 1.02,
+        "corridor": "right",
+        "bbox_norm": [
+          0.5604,
+          0.1801,
+          1.0,
+          0.9907
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.63,
+        "distance_m": 2.01,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.1832,
+          0.6484,
+          1.0
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.679,
+        "distance_m": 1.44,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.1739,
+          0.6868,
+          0.9969
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.421,
+        "distance_m": 1.69,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3242,
+          0.0031,
+          0.9231,
+          0.5807
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "person",
+        "confidence": 0.595,
+        "distance_m": 1.79,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.1677,
+          0.7088,
+          1.0
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.465,
+        "distance_m": 1.61,
+        "corridor": "center",
+        "bbox_norm": [
+          0.3462,
+          0.0031,
+          0.967,
+          0.5839
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "person",
+        "confidence": 0.488,
+        "distance_m": 1.71,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.1646,
+          0.7363,
+          1.0
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.456,
+        "distance_m": 1.6,
+        "corridor": "right",
+        "bbox_norm": [
+          0.3462,
+          0.0031,
+          1.0,
+          0.5963
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "person",
+        "confidence": 0.565,
+        "distance_m": 1.79,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.1863,
+          0.7692,
+          1.0
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.709,
+        "distance_m": 1.59,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.2236,
+          0.7253,
+          1.0
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "chair",
+        "confidence": 0.572,
+        "distance_m": 1.55,
+        "corridor": "right",
+        "bbox_norm": [
+          0.3736,
+          0.0031,
+          0.9945,
+          0.736
+        ],
+        "severity": "caution"
+      },
+      {
+        "label": "person",
+        "confidence": 0.799,
+        "distance_m": 1.57,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.2267,
+          0.6923,
+          1.0
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.764,
+        "distance_m": 0.99,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.2298,
+          0.6538,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "chair",
+        "confidence": 0.617,
+        "distance_m": 1.36,
+        "corridor": "right",
+        "bbox_norm": [
+          0.3791,
+          0.0031,
+          1.0,
+          0.7391
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.701,
+        "distance_m": 1.08,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.2298,
+          0.5769,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.666,
+        "distance_m": 0.41,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0932,
+          0.5824,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.842,
+        "distance_m": 0.4,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.1491,
+          0.9396,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.392,
+        "distance_m": 0.37,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.989,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.799,
+        "distance_m": 0.61,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.542,
+        "distance_m": 0.39,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.57,
+        "distance_m": 0.81,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0,
+          0.6374,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.79,
+        "distance_m": 0.81,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.9835,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.579,
+        "distance_m": 0.71,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0385,
+          0.0031,
+          1.0,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.635,
+        "distance_m": 0.84,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.48,
+        "distance_m": 0.91,
+        "corridor": "center",
+        "bbox_norm": [
+          0.0165,
+          0.0466,
+          1.0,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.387,
+        "distance_m": 0.93,
+        "corridor": "left",
+        "bbox_norm": [
+          0.011,
+          0.0031,
+          0.4121,
+          0.9907
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.428,
+        "distance_m": 0.86,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.4341,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.48,
+        "distance_m": 0.59,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.511,
+          0.9969
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.441,
+        "distance_m": 0.88,
+        "corridor": "center",
+        "bbox_norm": [
+          0.011,
+          0.0031,
+          0.6703,
+          0.9907
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.616,
+        "distance_m": 0.97,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.6099,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.689,
+        "distance_m": 0.93,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.5549,
+          0.9752
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.562,
+        "distance_m": 0.98,
+        "corridor": "left",
+        "bbox_norm": [
+          0.011,
+          0.0,
+          0.5,
+          0.9689
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.472,
+        "distance_m": 1.08,
+        "corridor": "right",
+        "bbox_norm": [
+          0.4121,
+          0.5497,
+          0.9945,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.687,
+        "distance_m": 1.09,
+        "corridor": "left",
+        "bbox_norm": [
+          0.011,
+          0.0031,
+          0.4286,
+          0.9503
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.433,
+        "distance_m": 1.05,
+        "corridor": "right",
+        "bbox_norm": [
+          0.478,
+          0.5776,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.714,
+        "distance_m": 1.2,
+        "corridor": "left",
+        "bbox_norm": [
+          0.011,
+          0.0031,
+          0.3626,
+          0.9565
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.692,
+        "distance_m": 1.09,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6429,
+          0.6149,
+          0.9945,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.692,
+        "distance_m": 1.1,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0055,
+          0.0031,
+          0.4176,
+          0.9565
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.552,
+        "distance_m": 0.97,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6648,
+          0.6584,
+          0.9945,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.549,
+        "distance_m": 0.98,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6703,
+          0.6801,
+          0.9945,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.623,
+        "distance_m": 1.26,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0,
+          0.3022,
+          0.7267
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.602,
+        "distance_m": 1.0,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6538,
+          0.6863,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      },
+      {
+        "label": "person",
+        "confidence": 0.722,
+        "distance_m": 1.36,
+        "corridor": "left",
+        "bbox_norm": [
+          0.0,
+          0.0031,
+          0.2747,
+          0.7267
+        ],
+        "severity": "caution"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.534,
+        "distance_m": 1.0,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6429,
+          0.7081,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [
+      {
+        "label": "person",
+        "confidence": 0.494,
+        "distance_m": 0.91,
+        "corridor": "right",
+        "bbox_norm": [
+          0.6374,
+          0.7516,
+          1.0,
+          1.0
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [],
+    [
+      {
+        "label": "person",
+        "confidence": 0.681,
+        "distance_m": 1.02,
+        "corridor": "right",
+        "bbox_norm": [
+          0.3846,
+          0.0,
+          1.0,
+          0.9938
+        ],
+        "severity": "danger"
+      }
+    ],
+    [],
+    [],
+    [],
+    []
+  ]
+}
