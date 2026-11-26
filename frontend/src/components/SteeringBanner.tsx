@@ -143,6 +143,11 @@ export function SteeringBanner({ guidance, giant = false }: SteeringBannerProps)
             >
               {headline}
             </span>
+            {guidance.lens_blocked && (
+              <span className="rounded-lg border border-red-400/70 bg-red-500/30 px-2 py-0.5 text-xs font-extrabold uppercase text-red-100">
+                Lens Blocked
+              </span>
+            )}
             {guidance.overhead_hazard && (
               <span className="rounded-lg border border-red-400/60 bg-red-500/25 px-2 py-0.5 text-xs font-extrabold uppercase text-red-100">
                 Overhead
@@ -151,6 +156,11 @@ export function SteeringBanner({ guidance, giant = false }: SteeringBannerProps)
             {guidance.wall_override && (
               <span className="rounded-lg border border-red-400/60 bg-red-500/25 px-2 py-0.5 text-xs font-extrabold uppercase text-red-100">
                 Wall Ahead
+              </span>
+            )}
+            {typeof guidance.pitch_deg === 'number' && (
+              <span className="rounded-lg border border-sky-400/50 bg-sky-500/20 px-2 py-0.5 font-mono text-xs font-bold text-sky-200">
+                Pitch {guidance.pitch_deg.toFixed(0)}°
               </span>
             )}
           </div>

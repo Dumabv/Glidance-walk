@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DetectedObject, Severity } from '../types/telemetry';
 
 interface RgbBoxOverlayProps {
@@ -38,16 +39,89 @@ export function RgbBoxOverlay({
   large = false,
   className = '',
 }: RgbBoxOverlayProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({
+    w: 0,
+    h: 0,
+  });
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number }>({
+    w: 0,
+    h: 0,
+  });
+
+  const syncNaturalSize = useCallback(() => {
+    const img = imgRef.current;
+    if (!img || img.naturalWidth === 0 || img.naturalHeight === 0) return;
+    setNaturalSize((prev) =>
+      prev.w === img.naturalWidth && prev.h === img.naturalHeight
+        ? prev
+        : { w: img.naturalWidth, h: img.naturalHeight }
+    );
+  }, []);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      setContainerSize((prev) =>
+        Math.abs(prev.w - rect.width) < 0.5 && Math.abs(prev.h - rect.height) < 0.5
+          ? prev
+          : { w: rect.width, h: rect.height }
+      );
+    };
+
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Compute exact object-contain pixel rect so portrait & landscape frames never crop
+  // and normalized [0..1] YOLO boxes align to 0px error in Chromium/Safari/Firefox.
+  let fittedStyle: { width: number; height: number } | undefined;
+  if (
+    containerSize.w > 0 &&
+    containerSize.h > 0 &&
+    naturalSize.w > 0 &&
+    naturalSize.h > 0
+  ) {
+    const scale = Math.min(
+      containerSize.w / naturalSize.w,
+      containerSize.h / naturalSize.h
+    );
+    fittedStyle = {
+      width: Math.floor(naturalSize.w * scale * 100) / 100,
+      height: Math.floor(naturalSize.h * scale * 100) / 100,
+    };
+  }
+
   return (
     <div
+      ref={containerRef}
       className={`relative flex items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-slate-950 ${className}`}
     >
-      {/* Inner wrapper hugs the rendered image so normalized [0..1] boxes stay pixel-accurate across portrait & landscape */}
-      <div className="relative inline-block max-h-full max-w-full leading-none">
+      <div
+        className={
+          fittedStyle
+            ? 'relative shrink-0 leading-none'
+            : 'relative h-full w-full leading-none'
+        }
+        style={fittedStyle}
+      >
         <img
+          ref={imgRef}
           src={`data:image/jpeg;base64,${rawB64}`}
+          onLoad={syncNaturalSize}
           alt="Live phone camera view with detected obstacle bounding boxes"
-          className="block max-h-full max-w-full rounded-lg object-contain"
+          className={
+            fittedStyle
+              ? 'block h-full w-full rounded-lg'
+              : 'block h-full w-full rounded-lg object-contain'
+          }
         />
 
         {showCorridors && (
