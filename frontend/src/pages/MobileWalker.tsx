@@ -343,7 +343,7 @@ export function MobileWalker() {
         const dtSec = (nowPerf - prev.ts) / 1000;
         if (dtSec >= 0.14 && dtSec <= 0.95) {
           const closingSpeed = (prev.distM - obj.distance_m) / dtSec;
-          if (closingSpeed >= 0.65 && obj.distance_m <= 3.2) {
+          if (closingSpeed >= 0.65 && closingSpeed <= 6.5 && obj.distance_m <= 3.2) {
             if (!fastApproach || obj.distance_m < fastApproach.distM) {
               fastApproach = { label: lbl, distM: obj.distance_m, speedMps: Math.round(closingSpeed * 10) / 10 };
             }
