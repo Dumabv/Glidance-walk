@@ -62,7 +62,7 @@ WALKING_OBSTACLE_CLASSES = set(WALKING_WORLD_CLASSES) | {
     "refrigerator",
 }
 
-DEFAULT_YOLO_WEIGHTS = os.getenv("GLIDANCE_YOLO_MODEL", "glidance_stairs_v1.onnx")
+DEFAULT_YOLO_WEIGHTS = os.getenv("GLIDANCE_YOLO_MODEL", "glidance_indoor_v2.onnx")
 DANGER_OBJECT_M = 1.25
 CAUTION_OBJECT_M = 2.25
 
@@ -211,11 +211,14 @@ class SemanticObjectDetector:
         models_dir = Path(__file__).resolve().parent.parent / "data" / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Prefer fine-tuned ONNX model on RTX CUDA (fast ~4-6ms, high stairs recall)
+        # 1. Prefer fine-tuned ONNX model on RTX CUDA (fast ~20ms dual-head, high stairs+indoor recall)
         onnx_candidates: list[Path] = []
         if self.weights_name.lower().endswith(".onnx"):
             cand = Path(self.weights_name)
             onnx_candidates.append(cand if cand.is_absolute() else (models_dir / cand))
+            onnx_candidates.append(models_dir / "glidance_indoor_v2.onnx")
+            onnx_candidates.append(Path(r"D:\glidance_models\runs\glidance_indoor_v2\weights\best.onnx"))
+            onnx_candidates.append(models_dir / "glidance_stairs_v1.onnx")
             onnx_candidates.append(Path(r"D:\glidance_models\runs\glidance_stairs_v1\weights\best.onnx"))
         for cand in onnx_candidates:
             if self._try_load_onnx(cand):
@@ -375,9 +378,14 @@ class SemanticObjectDetector:
                 else None
             )
 
-        # When paired with general COCO head, primary specialist focuses on stairs/step/curb
-        # while general YOLO11n head handles chair/table/person/bench/car/bicycle/etc.
-        primary_allowed = STAIRS_CURB_LABELS if out_general is not None else None
+        # Primary fine-tuned head handles stairs + indoor furniture/doors/walls;
+        # companion YOLO11n head adds street/general classes (car/truck/bus/bicycle/bench/person)
+        # and suppresses false stairs on vehicles.
+        primary_allowed = (
+            STAIRS_CURB_LABELS | {"chair", "table", "door", "wall", "couch"}
+            if out_general is not None
+            else None
+        )
         detections = self._decode_yolo_output(
             out_primary,
             self._ort_names,
@@ -409,6 +417,9 @@ class SemanticObjectDetector:
             if vehicle_boxes:
                 filtered_primary: list[DetectedObject] = []
                 for d in detections:
+                    if d.label not in STAIRS_CURB_LABELS:
+                        filtered_primary.append(d)
+                        continue
                     sx1, sy1, sx2, sy2 = d.bbox_norm
                     s_area = max(1e-6, (sx2 - sx1) * (sy2 - sy1))
                     overlaps_vehicle = False
@@ -422,7 +433,26 @@ class SemanticObjectDetector:
                     if not overlaps_vehicle:
                         filtered_primary.append(d)
                 detections = filtered_primary
-            detections.extend(general_dets)
+
+            # Deduplicate overlapping boxes between primary & general heads (keep higher confidence)
+            for g in general_dets:
+                gx1, gy1, gx2, gy2 = g.bbox_norm
+                g_area = max(1e-6, (gx2 - gx1) * (gy2 - gy1))
+                is_dup = False
+                for d in detections:
+                    dx1, dy1, dx2, dy2 = d.bbox_norm
+                    d_area = max(1e-6, (dx2 - dx1) * (dy2 - dy1))
+                    ix1, iy1 = max(gx1, dx1), max(gy1, dy1)
+                    ix2, iy2 = min(gx2, dx2), min(gy2, dy2)
+                    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                    iou = inter / max(1e-6, g_area + d_area - inter)
+                    if iou >= 0.45 and (
+                        d.label == g.label or {d.label, g.label} == {"table", "dining table"}
+                    ):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    detections.append(g)
         return detections
 
     def detect(
