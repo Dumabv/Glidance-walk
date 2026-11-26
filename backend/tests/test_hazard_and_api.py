@@ -449,3 +449,40 @@ def test_ci_baked_classroom_photos_and_71s_walk_replay() -> None:
     assert walk_rep["diagnostics"]["health_score"] >= 60
     assert walk_rep["passed"] is True
     assert all(sc["passed"] for sc in walk_rep["scenarios"])
+
+
+def test_blank_vertical_wall_triggers_stop_while_far_wall_and_floor_stay_clear() -> None:
+    """Blank matte wall at ~1.3-1.6m (inverted/flat vertical depth) must STOP; 3.5m+ wall & open floor stay CLEAR."""
+    from backend.vision.hazard_detector import fuse_close_range_metric_depth
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+
+    # 1. Close vertical wall (top 1.15m -> baseboard 1.62m, uniform across L/C/R) -> STOP + wall_override
+    h, w = 180, 140
+    y = np.linspace(1.10, 1.65, h, dtype=np.float32)[:, None]
+    close_wall = np.repeat(y, w, axis=1)
+    wall_res = fuse_close_range_metric_depth(base_haz, close_wall, pitch_deg=72.0, config=cfg)
+    assert wall_res.overall_severity == "danger"
+    assert wall_res.steering == "STOP"
+    assert wall_res.wall_override is True
+    assert "Wall ahead" in wall_res.spoken_cue
+
+    # 2. Far empty wall (3.6m away) -> stays CLEAR (no false alarm)
+    far_wall = np.full((h, w), 3.6, dtype=np.float32)
+    far_res = fuse_close_range_metric_depth(base_haz, far_wall, pitch_deg=72.0, config=cfg)
+    assert far_res.steering == "CLEAR"
+    assert far_res.overall_severity == "clear"
+
+    # 3. Open hallway floor (top 3.2m -> bottom 1.5m, positive receding slope) -> stays CLEAR
+    y_floor = np.linspace(3.2, 1.5, h, dtype=np.float32)[:, None]
+    open_floor = np.repeat(y_floor, w, axis=1)
+    floor_res = fuse_close_range_metric_depth(base_haz, open_floor, pitch_deg=72.0, config=cfg)
+    assert floor_res.steering == "CLEAR"
+    assert floor_res.overall_severity == "clear"

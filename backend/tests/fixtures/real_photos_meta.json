@@ -1,6 +1,6 @@
 {
   "trace_name": "real_photos",
-  "sample_count": 20,
+  "sample_count": 22,
   "depth_model": "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
   "is_metric_model": true,
   "yolo_active": true,
@@ -478,6 +478,26 @@
           "severity": "clear"
         }
       ]
+    },
+    {
+      "index": 20,
+      "sample_id": "real-02de7a7a",
+      "label": "obstacle_center",
+      "note": "Blank grey hallway wall directly ahead (~1.5m) with tiled floor & shadow",
+      "raw_spread_milli": 241,
+      "luma_mean": 144.67,
+      "luma_std": 13.3,
+      "objects": []
+    },
+    {
+      "index": 21,
+      "sample_id": "real-06658b7f",
+      "label": "obstacle_center",
+      "note": "Blank sage-green hallway wall directly ahead (~1.3m) with tiled floor",
+      "raw_spread_milli": 205,
+      "luma_mean": 142.6,
+      "luma_std": 26.28,
+      "objects": []
     }
   ]
 }
