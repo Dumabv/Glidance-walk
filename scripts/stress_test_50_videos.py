@@ -1,6 +1,7 @@
 """50-Video Full-Pipeline Stress Test for Glidance (RTX 3050 Small-FP16 + Rust SIMD + Dual-Head ONNX + Wall/Door Shield)."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -153,6 +154,9 @@ def build_extra_real_clips(target_dir: Path, need_more: int) -> list[Path]:
     return created
 
 
+_SIM_POOL = ThreadPoolExecutor(max_workers=2)
+
+
 def evaluate_video(
     vp: Path,
     depth: DepthEngine,
@@ -192,6 +196,7 @@ def evaluate_video(
         t_sec = round(fi / max(native_fps, 1.0), 2)
 
         t0 = time.perf_counter()
+        yolo_fut = _SIM_POOL.submit(obj_det.detect_boxes_raw, rgb)
         pred = depth.predict_rgb(rgb)
         haz = hdet.analyze(
             pred.closeness,
@@ -200,15 +205,18 @@ def evaluate_video(
             luma_mean=pred.luma_mean,
             luma_std=pred.luma_std,
         )
-        ores = obj_det.detect(rgb, pred.depth_meters)
+        raw_boxes, _ = yolo_fut.result()
+        ores_objs = obj_det.attach_depth(raw_boxes, pred.depth_meters)
         # Apply same flat-floor guard as main.py
         flat_floor = haz.center.severity == "clear" and haz.curb.gradient_peak < 0.055
         objs = [
-            o for o in ores.objects
+            o for o in ores_objs
             if not (o.label in ("stairs", "step", "curb") and flat_floor and o.confidence < 0.65 and o.distance_m > 1.8)
         ]
         haz = hdet.fuse_objects(haz, objs, stateful=True)
-        haz, wobj = detect_close_flat_wall_or_door(rgb, haz)
+        haz, wobj = detect_close_flat_wall_or_door(
+            rgb, haz, pitch_deg=68.0, is_metric_depth=False, detector=hdet, stateful=True
+        )
         if wobj is not None and not any(o.label in ("wall", "door") for o in objs):
             objs.insert(0, wobj)
 
