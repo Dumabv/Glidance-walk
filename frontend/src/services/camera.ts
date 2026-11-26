@@ -9,10 +9,8 @@ export interface CameraAcquisitionResult {
   switchedDevice: boolean;
 }
 
-const DEFAULT_WIDTH = 640;
-const DEFAULT_HEIGHT = 480;
-const DEFAULT_FRAME_RATE: ConstrainDoubleRange = { ideal: 24, max: 30 };
-const HARDWARE_RELEASE_RETRY_MS = 180;
+const SWITCH_COOLDOWN_MS = 140;
+const HARDWARE_RELEASE_RETRY_MS = 240;
 
 const RETRYABLE_CONSTRAINT_ERRORS = new Set([
   'OverconstrainedError',
@@ -26,6 +24,13 @@ const TRANSIENT_HARDWARE_ERRORS = new Set([
   'TrackStartError',
   'AbortError',
 ]);
+
+const FRONT_LABEL_RE =
+  /(front|user|facetime|truedepth|selfie|integrated|built-in|webcam|фронтальн|передн|лицев|față|fata|avant)/i;
+const BACK_LABEL_RE =
+  /(back|rear|environment|world|задн|основн|тылов|spate|arrière|arriere|trasera|rück)/i;
+const SECONDARY_REAR_LENS_RE =
+  /(ultra\s*wide|telephoto|macro|depth|lidar|сверхширок|телефото|макро)/i;
 
 /**
  * Stops every track on a MediaStream so hardware locks (especially iOS Safari's
@@ -62,7 +67,8 @@ function isTransientHardwareError(err: unknown): boolean {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 function getVideoTrackDeviceId(stream: MediaStream | null): string | null {
@@ -74,6 +80,15 @@ function getVideoTrackDeviceId(stream: MediaStream | null): string | null {
 function getVideoTrackLabel(stream: MediaStream | null): string | null {
   const label = stream?.getVideoTracks()[0]?.label?.trim();
   return label ? label : null;
+}
+
+export function classifyLabelFacingMode(label: string): CameraFacingMode | null {
+  const trimmed = label.trim();
+  if (!trimmed) return null;
+  // Check back/rear before front because some labels include "Built-in Back Camera"
+  if (BACK_LABEL_RE.test(trimmed)) return 'environment';
+  if (FRONT_LABEL_RE.test(trimmed)) return 'user';
+  return null;
 }
 
 function inferFacingMode(
@@ -89,52 +104,88 @@ function inferFacingMode(
     return settings.facingMode;
   }
 
-  if (strictMatched) {
-    return requested;
+  const fromLabel = classifyLabelFacingMode(track.label ?? '');
+  if (fromLabel) {
+    return fromLabel;
   }
 
-  const label = track.label.toLowerCase();
-  if (/\b(front|user|facetime|truedepth|integrated|built-in|webcam)\b/.test(label)) {
-    return 'user';
-  }
-  if (/\b(back|rear|environment|world)\b/.test(label)) {
-    return 'environment';
+  if (strictMatched) {
+    return requested;
   }
 
   return requested;
 }
 
-async function findNextVideoInputDeviceId(
-  currentDeviceId: string | null
-): Promise<string | null> {
-  if (!navigator.mediaDevices?.enumerateDevices) return null;
+async function listUniqueVideoInputs(): Promise<MediaDeviceInfo[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const seen = new Set<string>();
-    const videoInputs = devices.filter((d) => {
+    return devices.filter((d) => {
       if (d.kind !== 'videoinput' || !d.deviceId || seen.has(d.deviceId)) {
         return false;
       }
       seen.add(d.deviceId);
       return true;
     });
-
-    if (videoInputs.length < 2) return null;
-    if (!currentDeviceId) return videoInputs[0].deviceId;
-
-    const currentIdx = videoInputs.findIndex(
-      (d) => d.deviceId === currentDeviceId
-    );
-    if (currentIdx === -1) {
-      return (
-        videoInputs.find((d) => d.deviceId !== currentDeviceId)?.deviceId ??
-        null
-      );
-    }
-    return videoInputs[(currentIdx + 1) % videoInputs.length].deviceId;
   } catch {
+    return [];
+  }
+}
+
+/**
+ * Picks the best matching `deviceId` for `targetFacingMode` (preferring the main
+ * 1x rear wide lens over Ultra Wide / Telephoto on multi-lens iPhones), or cycles
+ * to the next webcam on desktops that do not expose facingMode labels.
+ */
+async function findDeviceIdForFacingMode(
+  targetFacingMode: CameraFacingMode,
+  excludeDeviceId: string | null | undefined,
+  allowGenericCycle: boolean
+): Promise<string | null> {
+  const videoInputs = await listUniqueVideoInputs();
+  if (videoInputs.length === 0) return null;
+
+  const matchingByLabel = videoInputs.filter(
+    (d) => classifyLabelFacingMode(d.label) === targetFacingMode
+  );
+
+  if (matchingByLabel.length > 0) {
+    const scored = matchingByLabel
+      .map((d, idx) => {
+        const isExcluded = excludeDeviceId ? d.deviceId === excludeDeviceId : false;
+        const isSecondaryRear =
+          targetFacingMode === 'environment' && SECONDARY_REAR_LENS_RE.test(d.label);
+        const isMainBack =
+          targetFacingMode === 'environment' &&
+          /^(back camera|задняя камера|camera2 0, facing back)$/i.test(d.label.trim());
+        const score =
+          (isExcluded ? 100 : 0) +
+          (isSecondaryRear ? 20 : 0) +
+          (isMainBack ? -10 : 0);
+        return { deviceId: d.deviceId, score, idx };
+      })
+      .sort((a, b) => a.score - b.score || a.idx - b.idx);
+
+    const best = scored[0];
+    if (best && (!excludeDeviceId || best.deviceId !== excludeDeviceId)) {
+      return best.deviceId;
+    }
+  }
+
+  if (!allowGenericCycle || videoInputs.length < 2) {
     return null;
   }
+
+  if (!excludeDeviceId) {
+    return videoInputs[0].deviceId;
+  }
+
+  const currentIdx = videoInputs.findIndex((d) => d.deviceId === excludeDeviceId);
+  if (currentIdx === -1) {
+    return videoInputs.find((d) => d.deviceId !== excludeDeviceId)?.deviceId ?? null;
+  }
+  return videoInputs[(currentIdx + 1) % videoInputs.length].deviceId;
 }
 
 function buildResult(
@@ -149,7 +200,7 @@ function buildResult(
   const switchedDevice = previousDeviceId
     ? deviceId !== null
       ? deviceId !== previousDeviceId
-      : strictMatched
+      : actualFacingMode === requested
     : true;
 
   return {
@@ -197,19 +248,22 @@ async function tryAttempts(
 }
 
 /**
- * Requests a camera stream across iPhone (iOS Safari), Android, Windows, and macOS:
+ * Requests a camera stream reliably across iPhone (iOS Safari / WKWebView),
+ * Android, Windows, and macOS:
  *
- * 1. Tries `facingMode: { exact: preferredFacingMode }` first so iOS Safari and
- *    Android reliably open the main rear camera instead of scoring the front
- *    camera closer to 640x480.
- * 2. When switching on desktop OSes (Windows/macOS) whose webcams do not report
- *    `facingMode`, cycles through available `videoinput` deviceIds (e.g.,
- *    MacBook FaceTime <-> Continuity Camera / USB webcam).
- * 3. Falls back gracefully to `ideal` and `video: true` for single-camera laptops.
+ * 1. Requests bare `facingMode: { exact: preferredFacingMode }` WITHOUT width/height/fps
+ *    constraints so iOS Safari never throws `OverconstrainedError` on 60fps/12MP rear sensors.
+ * 2. If `exact` fails (WKWebView / desktop), matches a lens by `enumerateDevices()`
+ *    label (`Back Camera` / `Задняя камера` / `Front Camera`) and requests `deviceId: { exact }`.
+ * 3. Falls back to bare `facingMode: { ideal }` (WITHOUT `640x480` constraints that bias
+ *    iOS WebKit's fitness-distance algorithm toward the front FaceTime camera!).
+ * 4. Post-acquisition verification: if iOS still returned the wrong lens (e.g. front before
+ *    initial permission unlocked device labels), stops it, waits for AVFoundation release,
+ *    and re-acquires the exact matching `deviceId`.
  */
 export async function acquireCameraStream(
   preferredFacingMode: CameraFacingMode = 'environment',
-  options?: { previousDeviceId?: string | null }
+  options?: { previousDeviceId?: string | null; cooldownMs?: number }
 ): Promise<CameraAcquisitionResult> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error(
@@ -218,22 +272,11 @@ export async function acquireCameraStream(
   }
 
   const previousDeviceId = options?.previousDeviceId;
+  const cooldownMs = options?.cooldownMs ?? SWITCH_COOLDOWN_MS;
 
-  // Stage 1: Exact facingMode (iPhone, Android, Windows 2-in-1 / Surface)
+  // Stage 1: Clean exact facingMode (no width/height/frameRate to avoid iOS OverconstrainedError)
   const strictOutcome = await tryAttempts(
     [
-      {
-        strict: true,
-        constraints: {
-          video: {
-            facingMode: { exact: preferredFacingMode },
-            width: { ideal: DEFAULT_WIDTH },
-            height: { ideal: DEFAULT_HEIGHT },
-            frameRate: DEFAULT_FRAME_RATE,
-          },
-          audio: false,
-        },
-      },
       {
         strict: true,
         constraints: {
@@ -248,33 +291,24 @@ export async function acquireCameraStream(
     previousDeviceId
   );
 
-  if (strictOutcome.result) {
-    return strictOutcome.result;
-  }
+  let acquired: CameraAcquisitionResult | null = strictOutcome.result;
+  let lastError: unknown = strictOutcome.lastError;
 
-  // Stage 2: Desktop multi-camera switch via deviceId (Windows/macOS webcams)
-  if (previousDeviceId) {
-    const nextDeviceId = await findNextVideoInputDeviceId(previousDeviceId);
-    if (nextDeviceId) {
+  // Stage 2: Explicit deviceId matching preferredFacingMode (or next webcam on desktop switch)
+  if (!acquired) {
+    const matchedDeviceId = await findDeviceIdForFacingMode(
+      preferredFacingMode,
+      previousDeviceId,
+      Boolean(previousDeviceId)
+    );
+    if (matchedDeviceId) {
       const deviceOutcome = await tryAttempts(
         [
           {
-            strict: false,
+            strict: true,
             constraints: {
               video: {
-                deviceId: { exact: nextDeviceId },
-                width: { ideal: DEFAULT_WIDTH },
-                height: { ideal: DEFAULT_HEIGHT },
-                frameRate: DEFAULT_FRAME_RATE,
-              },
-              audio: false,
-            },
-          },
-          {
-            strict: false,
-            constraints: {
-              video: {
-                deviceId: { exact: nextDeviceId },
+                deviceId: { exact: matchedDeviceId },
               },
               audio: false,
             },
@@ -283,79 +317,130 @@ export async function acquireCameraStream(
         preferredFacingMode,
         previousDeviceId
       );
+      acquired = deviceOutcome.result;
+      lastError = deviceOutcome.lastError ?? lastError;
+    }
+  }
 
-      if (deviceOutcome.result) {
-        return deviceOutcome.result;
+  // Stage 3: Bare `ideal` facingMode (NO 640x480 resolution bias toward iPhone front camera!)
+  if (!acquired) {
+    const fallbackOutcome = await tryAttempts(
+      [
+        {
+          strict: false,
+          constraints: {
+            video: {
+              facingMode: { ideal: preferredFacingMode },
+            },
+            audio: false,
+          },
+        },
+        {
+          strict: false,
+          constraints: {
+            video: true,
+            audio: false,
+          },
+        },
+      ],
+      preferredFacingMode,
+      previousDeviceId
+    );
+    acquired = fallbackOutcome.result;
+    lastError = fallbackOutcome.lastError ?? lastError;
+  }
+
+  if (!acquired) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Unable to access any camera device.');
+  }
+
+  // Stage 4: Post-acquisition wrong-lens correction (handles iOS Safari returning front camera
+  // before first permission grant unlocked real device labels in enumerateDevices()).
+  const wrongFacing = acquired.actualFacingMode !== preferredFacingMode;
+  const stuckOnPrevious = Boolean(previousDeviceId && !acquired.switchedDevice);
+
+  if (wrongFacing || stuckOnPrevious) {
+    const correctedDeviceId = await findDeviceIdForFacingMode(
+      preferredFacingMode,
+      acquired.deviceId ?? previousDeviceId,
+      stuckOnPrevious
+    );
+
+    if (correctedDeviceId && correctedDeviceId !== acquired.deviceId) {
+      stopMediaStream(acquired.stream);
+      await sleep(cooldownMs);
+      try {
+        const correctedOutcome = await tryAttempts(
+          [
+            {
+              strict: true,
+              constraints: {
+                video: {
+                  deviceId: { exact: correctedDeviceId },
+                },
+                audio: false,
+              },
+            },
+          ],
+          preferredFacingMode,
+          previousDeviceId
+        );
+        if (correctedOutcome.result) {
+          return correctedOutcome.result;
+        }
+      } catch {
+        // Re-open with bare ideal fallback if exact deviceId failed unexpectedly
+        const recovery = await tryAttempts(
+          [{ strict: false, constraints: { video: true, audio: false } }],
+          preferredFacingMode,
+          previousDeviceId
+        );
+        if (recovery.result) {
+          return recovery.result;
+        }
       }
     }
   }
 
-  // Stage 3: Universal fallback (single-camera MacBook / Windows laptop)
-  const fallbackOutcome = await tryAttempts(
-    [
-      {
-        strict: false,
-        constraints: {
-          video: {
-            facingMode: { ideal: preferredFacingMode },
-            width: { ideal: DEFAULT_WIDTH },
-            height: { ideal: DEFAULT_HEIGHT },
-            frameRate: DEFAULT_FRAME_RATE,
-          },
-          audio: false,
-        },
-      },
-      {
-        strict: false,
-        constraints: {
-          video: {
-            facingMode: { ideal: preferredFacingMode },
-          },
-          audio: false,
-        },
-      },
-      {
-        strict: false,
-        constraints: {
-          video: true,
-          audio: false,
-        },
-      },
-    ],
-    preferredFacingMode,
-    previousDeviceId
-  );
-
-  if (fallbackOutcome.result) {
-    return fallbackOutcome.result;
-  }
-
-  const finalError = fallbackOutcome.lastError ?? strictOutcome.lastError;
-  throw finalError instanceof Error
-    ? finalError
-    : new Error('Unable to access any camera device.');
+  return acquired;
 }
 
 /**
- * Releases the current camera stream (required on iOS Safari before opening a
- * second lens), retries once if the camera HAL is still releasing, and opens
- * the opposite facingMode (or next desktop webcam on Windows/macOS).
+ * Releases the current camera stream with an iOS AVFoundation hardware cooldown,
+ * retries once if the camera HAL is still releasing, and opens the opposite lens.
  */
 export async function switchCameraStream(
   currentStream: MediaStream | null,
-  targetFacingMode: CameraFacingMode
+  targetFacingMode: CameraFacingMode,
+  options?: { cooldownMs?: number; retryCooldownMs?: number }
 ): Promise<CameraAcquisitionResult> {
   const previousDeviceId = getVideoTrackDeviceId(currentStream);
+  const hadActiveStream = Boolean(currentStream);
+  const cooldownMs = options?.cooldownMs ?? SWITCH_COOLDOWN_MS;
+  const retryCooldownMs = options?.retryCooldownMs ?? HARDWARE_RELEASE_RETRY_MS;
+
   stopMediaStream(currentStream);
 
+  // iOS Safari's AVCaptureSession needs a brief pause after track.stop() before opening another lens.
+  if (hadActiveStream && cooldownMs > 0) {
+    await sleep(cooldownMs);
+  }
+
   try {
-    return await acquireCameraStream(targetFacingMode, { previousDeviceId });
+    return await acquireCameraStream(targetFacingMode, {
+      previousDeviceId,
+      cooldownMs,
+    });
   } catch (err) {
-    if (!isTransientHardwareError(err)) {
+    if (!isTransientHardwareError(err) && !isRetryableConstraintError(err)) {
       throw err;
     }
-    // Mobile Safari / Android HALs occasionally need a brief cooldown after track.stop().
-    await sleep(HARDWARE_RELEASE_RETRY_MS);
-    return acquireCameraStream(targetFacingMode, { previousDeviceId });
+    await sleep(retryCooldownMs);
+    return acquireCameraStream(targetFacingMode, {
+      previousDeviceId,
+      cooldownMs,
+    });
   }
 }
