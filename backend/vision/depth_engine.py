@@ -50,6 +50,12 @@ ONNX_MODELS = {
         "depth-anything/Depth-Anything-V2-Small-Q8",
         280,
     ),
+    "small-fp16": (
+        "depth_anything_v2_small_fp16.onnx",
+        "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
+        "depth-anything/Depth-Anything-V2-Small-FP16",
+        280,
+    ),
     "base": (
         "depth_anything_v2_base_fp16.onnx",
         "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx",
