@@ -833,7 +833,8 @@ def fuse_yolo_with_verified_hazard(
             and (
                 obj.distance_m <= 2.15
                 or (
-                    obj.confidence >= 0.50
+                    obj.confidence >= 0.52
+                    and haz.center.severity != "clear"
                     and (obj.bbox_norm[3] - obj.bbox_norm[1]) >= 0.28
                     and obj.bbox_norm[3] >= 0.70
                 )

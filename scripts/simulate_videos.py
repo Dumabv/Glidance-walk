@@ -147,8 +147,10 @@ def run_video_profile(
             continue
 
         t_sec = round(frame_idx / max(native_fps, 1.0), 2)
+        if frame_bgr.shape[1] > 640:
+            nh = int(round(frame_bgr.shape[0] * (640.0 / frame_bgr.shape[1])))
+            frame_bgr = cv2.resize(frame_bgr, (640, nh), interpolation=cv2.INTER_AREA)
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(frame_rgb)
 
         t0 = time.perf_counter()
         depth_res = depth_engine.predict_rgb(frame_rgb)
@@ -280,37 +282,51 @@ def main() -> None:
     parser.add_argument("--videos-dir", default=r"D:\glidance_videos")
     parser.add_argument("--sample-fps", type=float, default=3.0)
     parser.add_argument("--max-frames", type=int, default=45)
+    parser.add_argument("--profiles", default="rtx_full_v2", help="Comma-separated profiles or 'all'")
     args = parser.parse_args()
 
     vdir = Path(args.videos_dir)
     out_dir = vdir / "sim_out"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure 4th ground-truth stitched walkthrough video exists
+    # Ensure ground-truth stitched walkthrough video exists
     build_ground_truth_walkthrough_video(vdir / "04_indoor_stairs_street_mix.mp4")
 
     video_files = sorted(
         p for p in vdir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".mp4", ".webm", ".mov", ".mkv", ".mpg"}
+        if p.is_file() and p.suffix.lower() in {".mp4", ".webm", ".mov", ".mkv", ".mpg", ".ogv"}
     )
     print(f"Found {len(video_files)} videos: {[p.name for p in video_files]}")
 
+    wanted = (
+        {"rtx_full_v2", "edge_fast_v2", "depth_only_large"}
+        if args.profiles.strip().lower() == "all"
+        else {x.strip() for x in args.profiles.split(",") if x.strip()}
+    )
+
     os.environ["GLIDANCE_RUNTIME"] = "onnx"
-    os.environ["GLIDANCE_ONNX_TIER"] = "large"
-    depth_large = DepthEngine(use_mock=False)
-    print(f"Loaded Depth Large: {depth_large.model_id} ({depth_large.device})")
-
-    os.environ["GLIDANCE_ONNX_TIER"] = "small"
-    depth_small = DepthEngine(use_mock=False)
-    print(f"Loaded Depth Small: {depth_small.model_id} ({depth_small.device})")
-
-    obj_det = SemanticObjectDetector()
-    print(f"Loaded Object Detector: {obj_det.weights_name} ({obj_det.device})")
+    depth_large = None
+    depth_small = None
+    obj_det = None
+    if wanted & {"rtx_full_v2", "depth_only_large"}:
+        os.environ["GLIDANCE_ONNX_TIER"] = "large"
+        depth_large = DepthEngine(use_mock=False)
+        print(f"Loaded Depth Large: {depth_large.model_id} ({depth_large.device})")
+    if "edge_fast_v2" in wanted:
+        os.environ["GLIDANCE_ONNX_TIER"] = "small"
+        depth_small = DepthEngine(use_mock=False)
+        print(f"Loaded Depth Small: {depth_small.model_id} ({depth_small.device})")
+    if wanted & {"rtx_full_v2", "edge_fast_v2"}:
+        obj_det = SemanticObjectDetector()
+        print(f"Loaded Object Detector: {obj_det.weights_name} ({obj_det.device})")
 
     profiles = [
-        ("rtx_full_v2", depth_large, obj_det, True),
-        ("edge_fast_v2", depth_small, obj_det, False),
-        ("depth_only_large", depth_large, None, False),
+        p for p in [
+            ("rtx_full_v2", depth_large, obj_det, True),
+            ("edge_fast_v2", depth_small, obj_det, False),
+            ("depth_only_large", depth_large, None, False),
+        ]
+        if p[0] in wanted
     ]
 
     all_reports: list[dict[str, Any]] = []
