@@ -426,6 +426,80 @@ def test_classroom_video_regression_fixes() -> None:
     assert "CUE_CONTRADICTION" in codes
 
 
+def test_yolo_world_stairs_and_step_escalation() -> None:
+    """Open-vocabulary stairs/step detections must escalate to CURB_DROP and resist foreground suppression."""
+    from backend.vision.hazard_detector import fuse_yolo_with_verified_hazard
+
+    cfg = CalibrationConfig()
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+    assert base_haz.curb.detected is False
+
+    stairs_center = DetectedObject(
+        label="stairs",
+        confidence=0.42,
+        distance_m=1.40,
+        corridor="center",
+        bbox_norm=[0.20, 0.45, 0.80, 0.92],
+        severity="caution",
+    )
+    nearby_person = DetectedObject(
+        label="person",
+        confidence=0.80,
+        distance_m=1.60,
+        corridor="right",
+        bbox_norm=[0.65, 0.20, 0.95, 0.88],
+        severity="caution",
+    )
+
+    fused = fuse_yolo_with_verified_hazard(base_haz, [stairs_center, nearby_person], cfg)
+    assert fused.curb.detected is True
+    assert fused.curb.stairs_likely is True
+    assert fused.steering == "CURB_DROP"
+    assert "Stairs" in fused.spoken_cue
+    assert "1.4m" in fused.spoken_cue
+
+
+def test_close_flat_wall_detector_guards_pitch_metric_and_2frame_debounce() -> None:
+    """PR #19 review guard: flat-wall detector must ignore floor/ceiling tilts, open metric depth, and 1-frame blur."""
+    from backend.vision.hazard_detector import detect_close_flat_wall_or_door
+
+    cfg = CalibrationConfig(confirm_frames=2)
+    det = GroundAwareHazardDetector(cfg)
+    clear_scene = build_synthetic_calibration_suite()[0]
+    base_haz = det.analyze(
+        clear_scene.closeness_map,
+        stateful=False,
+        raw_spread_milli=clear_scene.raw_spread_milli,
+    )
+    blank_door_rgb = np.full((240, 320, 3), 185, dtype=np.uint8)
+
+    h_floor, o_floor = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=35.0, detector=det, stateful=True
+    )
+    assert h_floor.steering == "CLEAR" and o_floor is None
+
+    h_metric, o_metric = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=78.0, is_metric_depth=True, detector=det, stateful=True
+    )
+    assert h_metric.steering == "CLEAR" and o_metric is None
+
+    det.reset()
+    h1, o1 = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=78.0, is_metric_depth=False, detector=det, stateful=True
+    )
+    assert h1.steering == "CLEAR" and o1 is None
+    h2, o2 = detect_close_flat_wall_or_door(
+        blank_door_rgb, base_haz, pitch_deg=78.0, is_metric_depth=False, detector=det, stateful=True
+    )
+    assert h2.steering == "STOP" and h2.wall_override is True and o2 is not None and o2.label == "wall"
+
+
 def test_ci_baked_classroom_photos_and_71s_walk_replay() -> None:
     """Fast GPU-free CI regression gate across 20 real classroom photos + full 71s classroom walk."""
     from pathlib import Path
@@ -464,7 +538,6 @@ def test_blank_vertical_wall_triggers_stop_while_far_wall_and_floor_stay_clear()
         raw_spread_milli=clear_scene.raw_spread_milli,
     )
 
-    # 1. Close vertical wall (top 1.15m -> baseboard 1.62m, uniform across L/C/R) -> STOP + wall_override
     h, w = 180, 140
     y = np.linspace(1.10, 1.65, h, dtype=np.float32)[:, None]
     close_wall = np.repeat(y, w, axis=1)
@@ -474,13 +547,11 @@ def test_blank_vertical_wall_triggers_stop_while_far_wall_and_floor_stay_clear()
     assert wall_res.wall_override is True
     assert "Wall ahead" in wall_res.spoken_cue
 
-    # 2. Far empty wall (3.6m away) -> stays CLEAR (no false alarm)
     far_wall = np.full((h, w), 3.6, dtype=np.float32)
     far_res = fuse_close_range_metric_depth(base_haz, far_wall, pitch_deg=72.0, config=cfg)
     assert far_res.steering == "CLEAR"
     assert far_res.overall_severity == "clear"
 
-    # 3. Open hallway floor (top 3.2m -> bottom 1.5m, positive receding slope) -> stays CLEAR
     y_floor = np.linspace(3.2, 1.5, h, dtype=np.float32)[:, None]
     open_floor = np.repeat(y_floor, w, axis=1)
     floor_res = fuse_close_range_metric_depth(base_haz, open_floor, pitch_deg=72.0, config=cfg)
@@ -502,7 +573,6 @@ def test_relative_large_model_planar_wall_triggers_stop_and_ignores_clear_floors
     )
 
     h, w = 180, 140
-    # 1. Tilted-down blank wall (top closer ~0.68 -> baseboard farther ~0.05) -> STOP
     wall_cl = np.repeat(np.linspace(0.70, 0.04, h, dtype=np.float32)[:, None], w, axis=1)
     res_wall = fuse_relative_planar_wall(base_haz, wall_cl, pitch_deg=72.0, config=cfg)
     assert res_wall.steering == "STOP"
@@ -510,18 +580,15 @@ def test_relative_large_model_planar_wall_triggers_stop_and_ignores_clear_floors
     assert res_wall.wall_override is True
     assert "Wall ahead" in res_wall.spoken_cue
 
-    # 2. Straight-on close wall (uniform closeness ~0.82 top-to-bottom) -> STOP
     flat_wall = np.full((h, w), 0.82, dtype=np.float32)
     res_flat = fuse_relative_planar_wall(base_haz, flat_wall, pitch_deg=88.0, config=cfg)
     assert res_flat.steering == "STOP"
     assert res_flat.wall_override is True
 
-    # 3. Open floor (top far ~0.10 -> bottom close ~0.75) -> stays CLEAR
     floor_cl = np.repeat(np.linspace(0.10, 0.75, h, dtype=np.float32)[:, None], w, axis=1)
     res_floor = fuse_relative_planar_wall(base_haz, floor_cl, pitch_deg=72.0, config=cfg)
     assert res_floor.steering == "CLEAR"
     assert res_floor.wall_override is False
 
-    # 4. Aimed at ceiling (pitch=130°) -> ignored so ceiling never triggers wall STOP
     res_ceil = fuse_relative_planar_wall(base_haz, wall_cl, pitch_deg=130.0, config=cfg)
     assert res_ceil.steering == "CLEAR"

@@ -4,8 +4,13 @@ import {
   CameraOff,
   ChevronDown,
   ChevronUp,
+  Eye,
   Film,
+  Flashlight,
+  Headphones,
   Lock,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
   Radio,
@@ -161,6 +166,10 @@ export function MobileWalker() {
   const guidanceProfileRef = useRef<GuidanceProfile>('metal_detector');
   const [voiceLang, setVoiceLang] = useState<VoiceLang>('en');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
+  const [sceneCaption, setSceneCaption] = useState<string | null>(null);
+  const [approachingAlert, setApproachingAlert] = useState<{ label: string; distM: number; speedMps: number } | null>(null);
   const [devOpen, setDevOpen] = useState(false);
   const [lastPulse, setLastPulse] = useState<HapticPulseEvent | null>(null);
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
@@ -172,6 +181,7 @@ export function MobileWalker() {
   const videoAspectRef = useRef<'portrait' | 'landscape'>('portrait');
   const dispatchFrameRef = useRef<(force?: boolean) => void>(() => {});
   const lastAnnouncedSteeringRef = useRef<string | null>(null);
+  const prevObjDistRef = useRef<Record<string, { distM: number; ts: number }>>({});
 
   const audioRef = useRef<SpatialAudioEngine | null>(null);
   const hapticsRef = useRef<HapticsEngine | null>(null);
@@ -222,6 +232,103 @@ export function MobileWalker() {
     hapticsRef.current?.setMetalDetectorMode(isMetal);
     hapticsRef.current?.setCalmBackoff(guidanceProfile === 'smart_calm');
   }, [guidanceProfile]);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement) {
+        setIsFullscreen(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    hapticsRef.current?.triggerTapFeedback();
+    if (isFullscreen) {
+      setIsFullscreen(false);
+      try {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+        }
+      } catch {
+        // Ignore if browser exited fullscreen natively
+      }
+    } else {
+      setIsFullscreen(true);
+      try {
+        if (document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch {
+        // CSS fixed-inset fullscreen overlay still works cleanly on iOS/WebViews
+      }
+    }
+  }, [isFullscreen]);
+
+  const toggleTorch = useCallback(async () => {
+    hapticsRef.current?.triggerTapFeedback();
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    const next = !torchOn;
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: next } as unknown as MediaTrackConstraintSet],
+      });
+      setTorchOn(next);
+    } catch {
+      setSceneCaption('Flashlight not supported on this lens.');
+      window.setTimeout(() => setSceneCaption(null), 2500);
+    }
+  }, [torchOn]);
+
+  const describeSceneEnglish = useCallback(() => {
+    audioRef.current?.unlock();
+    hapticsRef.current?.triggerTapFeedback();
+    if (!guidance) {
+      const msg = 'No camera frame yet. Start the walking stream first.';
+      setSceneCaption(msg);
+      window.setTimeout(() => setSceneCaption(null), 3000);
+      return;
+    }
+    const parts: string[] = [];
+    if (guidance.curb?.detected) {
+      parts.push(guidance.curb.stairs_likely ? 'Stairs detected ahead' : 'Curb or step down ahead');
+    } else if (guidance.wall_override) {
+      parts.push(`Wall or door close ahead at ${guidance.center.min_distance_m.toFixed(1)} meters`);
+    }
+    const objs = (guidance.objects ?? []).slice(0, 3);
+    if (objs.length > 0) {
+      const desc = objs.map((o) => {
+        const where = o.corridor === 'center' ? 'ahead' : `on the ${o.corridor}`;
+        return `${o.label} ${where} at ${o.distance_m.toFixed(1)} meters`;
+      });
+      parts.push(desc.join(', '));
+    }
+    if (guidance.steering === 'CLEAR') {
+      parts.push('Path is clear ahead.');
+    } else if (guidance.steering === 'VEER_LEFT') {
+      parts.push('Left side is clearer.');
+    } else if (guidance.steering === 'VEER_RIGHT') {
+      parts.push('Right side is clearer.');
+    } else if (guidance.steering === 'STOP') {
+      parts.push('Path blocked ahead, stop.');
+    }
+    const sentence = parts.length > 0 ? parts.join('. ') : guidance.spoken_cue;
+    setSceneCaption(sentence);
+    window.setTimeout(() => setSceneCaption(null), 4000);
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(sentence);
+        u.lang = 'en-US';
+        u.rate = 1.08;
+        window.speechSynthesis.speak(u);
+      } catch {
+        // Ignore speech synthesis errors on restricted WebViews
+      }
+    }
+  }, [guidance]);
 
   useEffect(() => {
     audioRef.current?.setVoiceLang(voiceLang);
@@ -290,6 +397,31 @@ export function MobileWalker() {
       );
     }
     setGuidance(data);
+
+    // Dynamic Approach-Speed Detector (person / car / bicycle / dog closing in > 0.65 m/s)
+    const nowPerf = performance.now();
+    const MOVABLE = new Set(['person', 'car', 'truck', 'bus', 'bicycle', 'motorcycle', 'dog']);
+    let fastApproach: { label: string; distM: number; speedMps: number } | null = null;
+    const prevMap = prevObjDistRef.current;
+    for (const obj of data.objects ?? []) {
+      const lbl = obj.label.toLowerCase();
+      if (!MOVABLE.has(lbl)) continue;
+      const trackKey = `${lbl}:${obj.corridor}`;
+      const prev = prevMap[trackKey];
+      if (prev) {
+        const dtSec = (nowPerf - prev.ts) / 1000;
+        if (dtSec >= 0.14 && dtSec <= 0.95) {
+          const closingSpeed = (prev.distM - obj.distance_m) / dtSec;
+          if (closingSpeed >= 0.65 && closingSpeed <= 6.5 && obj.distance_m <= 3.2) {
+            if (!fastApproach || obj.distance_m < fastApproach.distM) {
+              fastApproach = { label: lbl, distM: obj.distance_m, speedMps: Math.round(closingSpeed * 10) / 10 };
+            }
+          }
+        }
+      }
+      prevMap[trackKey] = { distM: obj.distance_m, ts: nowPerf };
+    }
+    setApproachingAlert(fastApproach);
 
     const now = Date.now();
     const measuredRtt = Math.max(1, Math.round(now - data.client_ts));
@@ -1063,6 +1195,19 @@ export function MobileWalker() {
           <span>Camera: {cameraLabel}</span>
         </button>
 
+        <button
+          type="button"
+          onClick={() => void toggleFullscreen()}
+          className="flex items-center justify-center gap-1.5 rounded-2xl border border-sky-500/60 bg-sky-950/60 px-3.5 py-4 text-xs font-bold text-sky-100 hover:bg-sky-900/70"
+        >
+          {isFullscreen ? (
+            <Minimize2 className="h-5 w-5" aria-hidden="true" />
+          ) : (
+            <Maximize2 className="h-5 w-5" aria-hidden="true" />
+          )}
+          <span>{isFullscreen ? 'Exit Full' : 'Fullscreen'}</span>
+        </button>
+
         {streaming && (
           <button
             type="button"
@@ -1088,15 +1233,16 @@ export function MobileWalker() {
         )}
       </div>
 
-      {/* Calm Guidance Profile Selector (eliminates audio fatigue & stationary nagging!) */}
+      {/* Calm Guidance Profile Selector (includes iOS + Android Headphones 3D Binaural mode!) */}
       <div
         role="group"
         aria-label="Audio guidance profile"
-        className="grid grid-cols-3 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 text-xs font-semibold"
+        className="grid grid-cols-2 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 text-xs font-semibold sm:grid-cols-4"
       >
         {(
           [
             { id: 'metal_detector', label: 'Metal Detector' },
+            { id: 'headphones_3d', label: '🎧 Headphones 3D' },
             { id: 'tactile_only', label: 'Silent Vibro' },
             { id: 'smart_calm', label: 'Smart Calm' },
           ] as const
@@ -1110,6 +1256,10 @@ export function MobileWalker() {
               audioRef.current?.unlock();
               hapticsRef.current?.triggerTapFeedback();
               setGuidanceProfile(p.id);
+              if (p.id === 'headphones_3d') {
+                setSonarOn(true);
+                audioRef.current?.playHeadphonesLRTest();
+              }
             }}
             className={`rounded-lg px-2 py-2 transition ${
               guidanceProfile === p.id
@@ -1121,6 +1271,22 @@ export function MobileWalker() {
           </button>
         ))}
       </div>
+
+      {guidanceProfile === 'headphones_3d' && (
+        <div className="flex items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/35 px-3 py-2 text-xs text-emerald-100">
+          <span className="flex items-center gap-1.5 font-medium">
+            <Headphones className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+            iOS &amp; Android 3D Stereo: Left ear = left obstacle · Right ear = right · Both = wall/stairs
+          </span>
+          <button
+            type="button"
+            onClick={() => audioRef.current?.playHeadphonesLRTest()}
+            className="shrink-0 rounded-lg border border-emerald-400/60 bg-emerald-900/70 px-2.5 py-1 font-bold text-emerald-100 hover:bg-emerald-800"
+          >
+            Test L/C/R
+          </button>
+        </div>
+      )}
 
       {/* Tactile & Audio controls */}
       <div className="grid grid-cols-2 gap-2.5">
@@ -1345,9 +1511,15 @@ export function MobileWalker() {
         </div>
       )}
 
-      {/* Live Camera Preview (Aspect-Ratio Faithful!) & Radar */}
+      {/* Live Camera Preview (Aspect-Ratio Faithful + True Fullscreen HUD!) & Radar */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900">
+        <div
+          className={
+            isFullscreen
+              ? 'fixed inset-0 z-50 flex flex-col bg-black'
+              : 'relative overflow-hidden rounded-xl border border-slate-800 bg-slate-900'
+          }
+        >
           <video
             ref={videoRef}
             autoPlay
@@ -1377,18 +1549,176 @@ export function MobileWalker() {
                 setVideoPaused(true);
               }
             }}
-            className={`w-full bg-black object-contain ${
-              videoAspect === 'portrait' ? 'aspect-[3/4] max-h-72' : 'aspect-[4/3]'
-            }`}
+            className={
+              isFullscreen
+                ? 'h-full w-full bg-black object-cover'
+                : `w-full bg-black object-contain ${
+                    videoAspect === 'portrait' ? 'aspect-[3/4] max-h-72' : 'aspect-[4/3]'
+                  }`
+            }
           />
+          {!isFullscreen && (
+            <button
+              type="button"
+              onClick={() => void toggleFullscreen()}
+              aria-label="Open fullscreen camera"
+              className="absolute right-2 top-2 rounded-lg border border-slate-600/70 bg-slate-950/75 p-2 text-slate-100 backdrop-blur hover:bg-slate-800"
+            >
+              <Maximize2 className="h-4 w-4" aria-hidden="true" />
+            </button>
+          )}
+          {isFullscreen && (
+            <>
+              {/* Top HUD: detected objects, approx distance, FPS/RTT, Describe/Torch/Voice & Exit */}
+              <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/80 via-black/45 to-transparent p-4">
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full bg-slate-950/85 px-3 py-1 text-xs font-bold text-sky-300 backdrop-blur">
+                      {fps} FPS · {rttMs} ms{guidance?.pitch_deg != null ? ` · ${Math.round(guidance.pitch_deg)}°` : ''}
+                    </span>
+                    {guidance && (
+                      <span className="rounded-full bg-slate-950/85 px-3 py-1 text-sm font-black text-white backdrop-blur">
+                        ~{Math.min(guidance.left.min_distance_m, guidance.center.min_distance_m, guidance.right.min_distance_m).toFixed(1)} m
+                      </span>
+                    )}
+                  </div>
+                  {approachingAlert && (
+                    <div className="inline-flex w-fit items-center gap-1.5 rounded-full border border-red-400 bg-red-600/90 px-3 py-1 text-xs font-black uppercase tracking-wide text-white shadow-lg">
+                      {`⚡ APPROACHING: ${approachingAlert.label} (~${approachingAlert.distM.toFixed(1)}m, ${approachingAlert.speedMps}m/s)`}
+                    </div>
+                  )}
+                  {guidance?.objects && guidance.objects.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {guidance.objects.slice(0, 3).map((obj, idx) => (
+                        <span
+                          key={`fs-${obj.label}-${idx}`}
+                          className="rounded-full border border-white/25 bg-black/75 px-3 py-1 text-xs font-extrabold uppercase tracking-wide text-amber-200 backdrop-blur"
+                        >
+                          {obj.label} · ~{obj.distance_m.toFixed(1)}m
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="pointer-events-auto flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label="Toggle Headphones 3D mode"
+                    onClick={() => {
+                      audioRef.current?.unlock();
+                      hapticsRef.current?.triggerTapFeedback();
+                      const next = guidanceProfile === 'headphones_3d' ? 'metal_detector' : 'headphones_3d';
+                      setGuidanceProfile(next);
+                      if (next === 'headphones_3d') {
+                        setSonarOn(true);
+                        audioRef.current?.playHeadphonesLRTest();
+                      }
+                    }}
+                    className={`flex items-center justify-center rounded-xl border px-2.5 py-2 text-xs font-bold backdrop-blur ${
+                      guidanceProfile === 'headphones_3d'
+                        ? 'border-emerald-400 bg-emerald-500/85 text-slate-950'
+                        : 'border-white/25 bg-black/75 text-slate-200'
+                    }`}
+                  >
+                    <Headphones className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Describe scene"
+                    onClick={describeSceneEnglish}
+                    className="flex items-center gap-1 rounded-xl border border-sky-400/70 bg-sky-950/80 px-2.5 py-2 text-xs font-bold text-sky-100 backdrop-blur hover:bg-sky-900/80"
+                  >
+                    <Eye className="h-4 w-4" aria-hidden="true" />
+                    <span className="hidden sm:inline">Describe</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={torchOn ? 'Turn flashlight off' : 'Turn flashlight on'}
+                    onClick={() => void toggleTorch()}
+                    className={`flex items-center justify-center rounded-xl border px-2.5 py-2 text-xs font-bold backdrop-blur ${
+                      torchOn
+                        ? 'border-amber-300 bg-amber-500/85 text-slate-950'
+                        : 'border-white/25 bg-black/75 text-slate-200'
+                    }`}
+                  >
+                    <Flashlight className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={voiceOn ? 'Mute voice' : 'Enable voice'}
+                    onClick={() => {
+                      audioRef.current?.unlock();
+                      hapticsRef.current?.triggerTapFeedback();
+                      setVoiceOn((v) => !v);
+                    }}
+                    className={`flex items-center justify-center rounded-xl border px-2.5 py-2 text-xs font-bold backdrop-blur ${
+                      voiceOn
+                        ? 'border-emerald-400/80 bg-emerald-950/80 text-emerald-200'
+                        : 'border-white/25 bg-black/75 text-slate-300'
+                    }`}
+                  >
+                    {voiceOn ? (
+                      <Volume2 className="h-4 w-4" aria-hidden="true" />
+                    ) : (
+                      <VolumeX className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void toggleFullscreen()}
+                    className="flex items-center gap-1 rounded-xl border border-white/30 bg-black/75 px-3 py-2 text-xs font-bold text-white backdrop-blur hover:bg-slate-800"
+                  >
+                    <Minimize2 className="h-4 w-4" aria-hidden="true" />
+                    Exit
+                  </button>
+                </div>
+              </div>
+
+              {/* Bottom HUD: scene narration caption + big steering banner + L/C/R distances */}
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-2 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-4 pb-6">
+                {sceneCaption && (
+                  <div className="rounded-xl border border-sky-400/60 bg-slate-950/90 px-3.5 py-2 text-center text-xs font-semibold text-sky-100 backdrop-blur">
+                    {sceneCaption}
+                  </div>
+                )}
+                <div className={`rounded-2xl border-2 px-4 py-3 text-center backdrop-blur ${meta.bg} ${meta.border}`}>
+                  <div className="text-2xl font-black tracking-tight">{meta.title}</div>
+                  <div className="mt-0.5 text-sm font-semibold opacity-95">
+                    {guidance?.spoken_cue ?? 'Scanning...'}
+                  </div>
+                </div>
+                {guidance && (
+                  <div className="grid grid-cols-3 gap-2 text-center text-xs font-bold">
+                    {(['left', 'center', 'right'] as const).map((side) => {
+                      const z = guidance[side];
+                      const tone =
+                        z.severity === 'danger'
+                          ? 'border-red-500/80 bg-red-950/85 text-red-100'
+                          : z.severity === 'caution'
+                            ? 'border-amber-400/80 bg-amber-950/85 text-amber-100'
+                            : 'border-emerald-500/60 bg-emerald-950/75 text-emerald-100';
+                      return (
+                        <div key={side} className={`rounded-xl border px-2 py-1.5 backdrop-blur ${tone}`}>
+                          <div className="text-[10px] uppercase opacity-75">{side}</div>
+                          <div className="text-sm font-black">~{z.min_distance_m.toFixed(1)}m</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
           <canvas ref={canvasRef} className="hidden" />
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
-            <span className="truncate">
-              {videoFileName ? `Video: ${videoFileName}` : `Lens: ${cameraDeviceLabel ?? cameraLabel}`}
-            </span>
-            <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
-            <span>RTT: {rttMs} ms</span>
-          </div>
+          {!isFullscreen && (
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
+              <span className="truncate">
+                {videoFileName ? `Video: ${videoFileName}` : `Lens: ${cameraDeviceLabel ?? cameraLabel}`}
+              </span>
+              <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
+              <span>RTT: {rttMs} ms</span>
+            </div>
+          )}
           {videoFileName && (
             <div className="flex flex-col gap-2 border-t border-slate-800 bg-slate-950/80 px-3 py-2.5 text-xs">
               <div className="flex items-center gap-2">

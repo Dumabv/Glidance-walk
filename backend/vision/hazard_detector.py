@@ -258,6 +258,7 @@ class GroundAwareHazardDetector:
         self._yolo_alert_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._yolo_danger_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
         self._last_steer: SteeringAction = "CLEAR"
+        self._flat_wall_streak: int = 0
 
     @staticmethod
     def _to_c_config(cfg: CalibrationConfig) -> _CCalibrationConfig:
@@ -285,6 +286,7 @@ class GroundAwareHazardDetector:
             self._yolo_alert_streak = {"left": 0, "center": 0, "right": 0}
             self._yolo_danger_streak = {"left": 0, "center": 0, "right": 0}
             self._last_steer = "CLEAR"
+            self._flat_wall_streak = 0
 
     def fuse_objects(
         self,
@@ -375,13 +377,19 @@ class GroundAwareHazardDetector:
                 if (
                     prev_code < 2
                     and prev_code <= new_code
-                    and (prev_z.obstacle_score - new_z.obstacle_score) < 0.18
+                    and (prev_z.obstacle_score - new_z.obstacle_score) < 0.22
                 ):
                     steering = prev_steer
                     if steering == "VEER_LEFT":
-                        spoken = spoken.replace("Step right.", "Step left.").replace("Move right.", "Move left.")
+                        if "on left" in spoken.lower():
+                            spoken = "Obstacle ahead. Step left."
+                        else:
+                            spoken = spoken.replace("Step right.", "Step left.").replace("Move right.", "Move left.")
                     else:
-                        spoken = spoken.replace("Step left.", "Step right.").replace("Move left.", "Move right.")
+                        if "on right" in spoken.lower():
+                            spoken = "Obstacle ahead. Step right."
+                        else:
+                            spoken = spoken.replace("Step left.", "Step right.").replace("Move left.", "Move right.")
             self._last_steer = steering
 
         if steering != fused.steering or spoken != fused.spoken_cue:
@@ -792,8 +800,16 @@ _FOREGROUND_VERTICAL_OBJECTS = {
 }
 
 
+_STAIRS_CURB_LABELS: set[str] = {"stairs", "step", "curb"}
+
+
 def _has_foreground_object_on_curb(objects: list[DetectedObject]) -> bool:
     """Detects a close vertical foreground obstacle (chair/person/table) that can mimic a curb edge."""
+    if any(
+        obj.label in _STAIRS_CURB_LABELS and obj.confidence >= 0.30 and obj.distance_m <= 2.3
+        for obj in objects
+    ):
+        return False
     for obj in objects:
         if obj.confidence < 0.40 or obj.label not in _FOREGROUND_VERTICAL_OBJECTS:
             continue
@@ -811,25 +827,63 @@ def fuse_yolo_with_verified_hazard(
     objects: list[DetectedObject],
     config: CalibrationConfig,
 ) -> HazardResult:
-    """Enriches corridor distances & spoken cues with YOLOv8n while preserving Lean 4 invariants."""
+    """Enriches corridor distances, stairs/curbs & spoken cues with YOLO-World while preserving Lean 4 invariants."""
     if not objects or haz.lens_blocked:
         return haz
 
+    visual_step = min(
+        (
+            obj
+            for obj in objects
+            if obj.label in _STAIRS_CURB_LABELS
+            and obj.confidence >= 0.30
+            and obj.corridor == "center"
+            and (
+                obj.distance_m <= 2.15
+                or (
+                    obj.confidence >= 0.52
+                    and haz.center.severity != "clear"
+                    and (obj.bbox_norm[3] - obj.bbox_norm[1]) >= 0.28
+                    and obj.bbox_norm[3] >= 0.70
+                )
+            )
+        ),
+        key=lambda o: o.distance_m,
+        default=None,
+    )
+
     curb = haz.curb
     curb_suppressed = False
-    if curb.detected and _has_foreground_object_on_curb(objects):
+    curb_escalated = False
+    if visual_step is not None:
+        if not curb.detected or (visual_step.label == "stairs" and not curb.stairs_likely):
+            curb = curb.model_copy(
+                update={
+                    "detected": True,
+                    "stairs_likely": curb.stairs_likely or visual_step.label == "stairs",
+                    "confidence": max(curb.confidence, round(visual_step.confidence, 3)),
+                    "drop_row_ratio": round(
+                        max(curb.drop_row_ratio, float(visual_step.bbox_norm[3])),
+                        3,
+                    ),
+                }
+            )
+            curb_escalated = True
+    elif curb.detected and _has_foreground_object_on_curb(objects):
         curb = curb.model_copy(update={"detected": False, "stairs_likely": False, "confidence": 0.0})
         curb_suppressed = True
 
     nearest_by_corridor: dict[Corridor, DetectedObject] = {}
     for obj in objects:
-        if obj.confidence < 0.40 or obj.severity == "clear":
+        min_conf = 0.30 if obj.label in _STAIRS_CURB_LABELS else 0.32
+        if obj.confidence < min_conf or obj.severity == "clear":
             continue
         cur = nearest_by_corridor.get(obj.corridor)
         if cur is None or obj.distance_m < cur.distance_m:
             nearest_by_corridor[obj.corridor] = obj
 
-    if not nearest_by_corridor and not curb_suppressed:
+    has_named_context = haz.steering != "CLEAR" and any(o.confidence >= 0.45 for o in objects)
+    if not nearest_by_corridor and not curb_suppressed and not curb_escalated and not has_named_context:
         return haz
 
     zones: dict[Corridor, ZoneMetrics] = {
@@ -837,7 +891,7 @@ def fuse_yolo_with_verified_hazard(
         "center": haz.center,
         "right": haz.right,
     }
-    upgraded = curb_suppressed
+    upgraded = curb_suppressed or curb_escalated
     for side, obj in nearest_by_corridor.items():
         z = zones[side]
         new_dist = round(min(z.min_distance_m, obj.distance_m), 2)
@@ -894,27 +948,56 @@ def fuse_yolo_with_verified_hazard(
                 spoken = CUE_BY_CODE[14]
 
     # Enrich spoken_cue with the nearest named object and GUARANTEE non-CLEAR steering never says "Path clear."
-    if not curb.detected and not overhead_hazard:
+    # If depth already flagged a corridor (steering != CLEAR), fall back to confident YOLO objects in that corridor
+    # even when relative depth_meters estimated > 2.25m, so the user still hears WHAT the obstacle is!
+    def _best_corridor_obj(side: Corridor) -> DetectedObject | None:
+        if side in nearest_by_corridor:
+            return nearest_by_corridor[side]
+        cands = [o for o in objects if o.corridor == side and o.confidence >= 0.45]
+        return min(cands, key=lambda o: o.distance_m, default=None)
+
+    c_named = c_obj or _best_corridor_obj("center")
+    l_named = l_obj or _best_corridor_obj("left")
+    r_named = r_obj or _best_corridor_obj("right")
+
+    if curb.detected and visual_step is not None and not overhead_hazard:
+        eff_dist = min(visual_step.distance_m, center_z.min_distance_m)
+        if visual_step.label == "stairs" or curb.stairs_likely:
+            spoken = f"Stairs ahead ({eff_dist:.1f}m). Stop."
+        else:
+            spoken = f"{visual_step.label.capitalize()} ahead ({eff_dist:.1f}m). Stop."
+    elif not curb.detected and not overhead_hazard:
         if steering == "STOP":
-            if c_obj is not None:
-                spoken = f"{c_obj.label.capitalize()} blocking path at {c_obj.distance_m:.1f}m. Stop."
-            elif l_obj is not None and r_obj is not None:
-                spoken = f"Narrow gap between {l_obj.label} and {r_obj.label}. Stop."
+            if c_named is not None:
+                eff_dist = min(c_named.distance_m, center_z.min_distance_m)
+                spoken = f"{c_named.label.capitalize()} blocking path at {eff_dist:.1f}m. Stop."
+            elif l_named is not None and r_named is not None:
+                spoken = f"Narrow gap between {l_named.label} and {r_named.label}. Stop."
             else:
                 spoken = "Path blocked ahead. Stop."
         elif steering == "VEER_LEFT":
-            target = c_obj or r_obj
+            target = min(
+                (x for x in (c_named, r_named) if x is not None),
+                key=lambda o: o.distance_m,
+                default=None,
+            )
             if target is not None:
+                eff_dist = min(target.distance_m, zones[target.corridor].min_distance_m)
                 where = "ahead" if target.corridor == "center" else "on right"
-                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step left."
-            elif spoken == "Path clear." or curb_suppressed:
+                spoken = f"{target.label.capitalize()} {where} ({eff_dist:.1f}m). Step left."
+            elif spoken == "Path clear." or curb_suppressed or "step right" in spoken.lower() or "on left" in spoken.lower():
                 spoken = "Obstacle on right. Step left."
         elif steering == "VEER_RIGHT":
-            target = c_obj or l_obj
+            target = min(
+                (x for x in (c_named, l_named) if x is not None),
+                key=lambda o: o.distance_m,
+                default=None,
+            )
             if target is not None:
+                eff_dist = min(target.distance_m, zones[target.corridor].min_distance_m)
                 where = "ahead" if target.corridor == "center" else "on left"
-                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step right."
-            elif spoken == "Path clear." or curb_suppressed:
+                spoken = f"{target.label.capitalize()} {where} ({eff_dist:.1f}m). Step right."
+            elif spoken == "Path clear." or curb_suppressed or "step left" in spoken.lower() or "on right" in spoken.lower():
                 spoken = "Obstacle on left. Step right."
         elif steering == "CLEAR":
             spoken = "Path clear."
@@ -1124,6 +1207,92 @@ def fuse_close_range_metric_depth(
         center=center_z,
         right=right_z,
     )
+
+
+def detect_close_flat_wall_or_door(
+    rgb: np.ndarray,
+    haz: HazardResult,
+    *,
+    pitch_deg: float = 0.0,
+    is_metric_depth: bool = False,
+    detector: GroundAwareHazardDetector | None = None,
+    stateful: bool = False,
+) -> tuple[HazardResult, DetectedObject | None]:
+    """Detects a close smooth wall or door filling the camera (<1.0m) via high-frequency edge depletion.
+
+    Guarded by:
+      1. IMU pitch gate: ignored when pointing at floor (`0 < pitch < 55`) or ceiling (`pitch > 112`).
+      2. Metric depth gate: ignored when metric depth confirms open space (`center > 1.8m`).
+      3. Temporal debounce (`confirm_frames >= 2` in stateful mode) so single-frame hand motion blur
+         never triggers a false `STOP`.
+    """
+    if haz.lens_blocked or rgb is None or rgb.size == 0:
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
+        return haz, None
+
+    has_live_imu = bool(np.isfinite(pitch_deg) and abs(pitch_deg) > 1.0)
+    if has_live_imu and (pitch_deg < 55.0 or pitch_deg > 112.0):
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
+        return haz, None
+
+    if is_metric_depth and haz.center.min_distance_m > 1.8:
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
+        return haz, None
+
+    import cv2
+
+    small = cv2.resize(rgb, (240, 180), interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+    center = gray[36:144, 48:192]
+    luma_mean = float(np.mean(center))
+    if luma_mean < 15.0:
+        if detector is not None and stateful:
+            detector._flat_wall_streak = 0
+        return haz, None
+
+    edges = cv2.Canny(center, 40, 120)
+    edge_ratio = float(np.mean(edges > 0))
+    lap_var = float(cv2.Laplacian(center, cv2.CV_32F).var())
+
+    if edge_ratio < 0.045 and lap_var < 65.0:
+        if stateful and detector is not None:
+            detector._flat_wall_streak += 1
+            confirm_n = max(2, int(detector.config.confirm_frames))
+            if detector._flat_wall_streak < confirm_n:
+                return haz, None
+        # Smoothness/defocus proxy for approximate distance (0.35m..0.90m)
+        est_dist_m = round(0.35 + min(1.0, lap_var / 65.0) * 0.55, 2)
+        eff_dist = min(est_dist_m, haz.center.min_distance_m)
+        wall_obj = DetectedObject(
+            label="wall",
+            confidence=0.92,
+            distance_m=round(eff_dist, 2),
+            corridor="center",
+            bbox_norm=[0.08, 0.08, 0.92, 0.92],
+            severity="danger",
+        )
+        new_center = ZoneMetrics(
+            severity="danger",
+            obstacle_score=max(haz.center.obstacle_score, 0.92),
+            min_distance_m=round(eff_dist, 2),
+            coverage_ratio=max(haz.center.coverage_ratio, 0.85),
+        )
+        updated = replace(
+            haz,
+            overall_severity="danger",
+            steering="STOP",
+            wall_override=True,
+            center=new_center,
+            spoken_cue=f"Wall or door ahead (~{eff_dist:.1f}m). Stop.",
+        )
+        return updated, wall_obj
+
+    if detector is not None and stateful:
+        detector._flat_wall_streak = 0
+    return haz, None
 
 
 def fuse_relative_planar_wall(

@@ -1,15 +1,169 @@
 import type { GuidancePayload } from '../types/telemetry';
-import { evaluateForwardBlock } from './haptics';
+import { evaluateForwardBlock } from './haptics.ts';
 
-export type GuidanceProfile = 'metal_detector' | 'smart_calm' | 'sonar_3d' | 'tactile_only';
+export type GuidanceProfile =
+  | 'metal_detector'
+  | 'headphones_3d'
+  | 'smart_calm'
+  | 'sonar_3d'
+  | 'tactile_only';
 export type VoiceLang = 'ru' | 'en';
+
+export interface HeadphonesCuePlan {
+  kind: 'silence' | 'left_obstacle' | 'right_obstacle' | 'wall_stop' | 'stairs';
+  /** Stereo pan: -0.9 (left ear) .. 0.0 (both ears) .. +0.9 (right ear) */
+  pan: number;
+  freqStart: number;
+  freqEnd: number;
+  intervalMs: number;
+  volume: number;
+  doublePulse: boolean;
+}
+
+/**
+ * Pure, cross-platform (iOS Safari + Android Chrome) binaural headphone cue planner.
+ * - Obstacle on LEFT (VEER_RIGHT)  -> Left ear  (pan = -0.88)
+ * - Obstacle on RIGHT (VEER_LEFT)  -> Right ear (pan = +0.88)
+ * - Wall / STOP ahead              -> Both ears (pan = 0.0, low double bass)
+ * - Stairs / Curb drop             -> Both ears (pan = 0.0, descending 680->420Hz chime)
+ * - Clear path                     -> Complete silence
+ */
+export function computeHeadphonesCue(guidance: GuidancePayload): HeadphonesCuePlan {
+  const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
+  const minDist = Math.min(
+    guidance.left.min_distance_m,
+    guidance.center.min_distance_m,
+    guidance.right.min_distance_m
+  );
+  const closeness = clamp(1.0 - (minDist - 0.35) / 2.25, 0.0, 1.0);
+
+  if (guidance.overall_severity === 'clear' && !isCurb) {
+    return {
+      kind: 'silence',
+      pan: 0,
+      freqStart: 0,
+      freqEnd: 0,
+      intervalMs: 1000,
+      volume: 0,
+      doublePulse: false,
+    };
+  }
+
+  if (isCurb) {
+    return {
+      kind: 'stairs',
+      pan: 0,
+      freqStart: 680,
+      freqEnd: 420,
+      intervalMs: Math.round(520 - closeness * 220),
+      volume: 0.22,
+      doublePulse: true,
+    };
+  }
+
+  if (guidance.steering === 'STOP' || guidance.wall_override || guidance.lens_blocked) {
+    return {
+      kind: 'wall_stop',
+      pan: 0,
+      freqStart: 270,
+      freqEnd: 210,
+      intervalMs: Math.round(440 - closeness * 210),
+      volume: 0.24,
+      doublePulse: true,
+    };
+  }
+
+  if (guidance.steering === 'VEER_LEFT') {
+    // Obstacle is on the RIGHT -> sound in RIGHT ear (+0.88)
+    const freq = Math.round(440 + closeness * 380);
+    return {
+      kind: 'right_obstacle',
+      pan: 0.88,
+      freqStart: freq,
+      freqEnd: freq,
+      intervalMs: Math.round(620 - closeness * 360),
+      volume: clamp(0.13 + closeness * 0.11, 0.13, 0.24),
+      doublePulse: guidance.overall_severity === 'danger',
+    };
+  }
+
+  if (guidance.steering === 'VEER_RIGHT') {
+    // Obstacle is on the LEFT -> sound in LEFT ear (-0.88)
+    const freq = Math.round(440 + closeness * 380);
+    return {
+      kind: 'left_obstacle',
+      pan: -0.88,
+      freqStart: freq,
+      freqEnd: freq,
+      intervalMs: Math.round(620 - closeness * 360),
+      volume: clamp(0.13 + closeness * 0.11, 0.13, 0.24),
+      doublePulse: guidance.overall_severity === 'danger',
+    };
+  }
+
+  const diff = guidance.right.obstacle_score - guidance.left.obstacle_score;
+  const pan = clamp(diff * 1.4, -0.88, 0.88);
+  const freq = Math.round(420 + closeness * 340);
+  return {
+    kind: pan < 0 ? 'left_obstacle' : 'right_obstacle',
+    pan: Math.round(pan * 100) / 100,
+    freqStart: freq,
+    freqEnd: freq,
+    intervalMs: Math.round(640 - closeness * 340),
+    volume: 0.16,
+    doublePulse: false,
+  };
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
+const RU_OBJECT_NAMES: Record<string, string> = {
+  person: 'Человек',
+  stairs: 'Лестница',
+  step: 'Ступенька',
+  curb: 'Бордюр',
+  door: 'Дверь',
+  'glass door': 'Стеклянная дверь',
+  wall: 'Стена',
+  pillar: 'Колонна',
+  railing: 'Перила',
+  chair: 'Стул',
+  table: 'Стол',
+  'dining table': 'Стол',
+  desk: 'Стол',
+  bench: 'Скамейка',
+  couch: 'Диван',
+  box: 'Коробка',
+  backpack: 'Рюкзак',
+  suitcase: 'Чемодан',
+  'trash can': 'Урна',
+  manhole: 'Люк',
+  bicycle: 'Велосипед',
+  car: 'Машина',
+  dog: 'Собака',
+  pole: 'Столб',
+};
+
+function getNearestNamedObject(guidance: GuidancePayload): string | null {
+  const objs = guidance.objects;
+  if (!objs || objs.length === 0) return null;
+  const active = objs.filter((o) => o.severity !== 'clear' && o.confidence >= 0.3);
+  if (active.length === 0) return null;
+  const centerObj = active.find((o) => o.corridor === 'center');
+  return (centerObj ?? active[0]).label.toLowerCase();
+}
+
+function formatObjName(label: string, lang: VoiceLang): string {
+  if (lang === 'ru') {
+    return RU_OBJECT_NAMES[label] ?? label;
+  }
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 /**
- * Action-only 1-word aviation/rally callouts.
+ * Action-only 1–2 word aviation/rally callouts with specific obstacle naming (stairs/door/chair/person/wall).
  * NEVER mixes two directions in one phrase (eliminates "Obstacle on RIGHT, step LEFT" confusion!).
  */
 function getCrispCallout(
@@ -17,8 +171,9 @@ function getCrispCallout(
   lang: VoiceLang
 ): { key: string; text: string; urgent: boolean } | null {
   const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
+  const objLabel = getNearestNamedObject(guidance);
 
-  if (guidance.glass_barrier) {
+  if (guidance.glass_barrier || objLabel === 'glass door') {
     return {
       key: 'GLASS_BARRIER',
       text: lang === 'ru' ? 'Стекло впереди' : 'Glass ahead',
@@ -32,17 +187,17 @@ function getCrispCallout(
       urgent: true,
     };
   }
-  if (isCurb) {
-    if (guidance.curb.stairs_likely) {
+  if (isCurb || objLabel === 'stairs' || objLabel === 'step' || objLabel === 'curb') {
+    if (guidance.curb.stairs_likely || objLabel === 'stairs') {
       return {
         key: 'STAIRS',
-        text: lang === 'ru' ? 'Лестница вниз' : 'Stairs ahead',
+        text: lang === 'ru' ? 'Лестница' : 'Stairs ahead',
         urgent: true,
       };
     }
     return {
       key: 'CURB',
-      text: lang === 'ru' ? 'Ступенька' : 'Step down',
+      text: lang === 'ru' ? 'Ступенька' : 'Step ahead',
       urgent: true,
     };
   }
@@ -54,40 +209,64 @@ function getCrispCallout(
     };
   }
   if (guidance.steering === 'STOP') {
+    const noun = objLabel
+      ? formatObjName(objLabel, lang)
+      : guidance.wall_override
+        ? lang === 'ru'
+          ? 'Стена'
+          : 'Wall'
+        : null;
     if (typeof guidance.best_escape_deg === 'number' && Math.abs(guidance.best_escape_deg) >= 25) {
       const goLeft = guidance.best_escape_deg < 0;
+      const prefix = noun ? `${noun}, ` : '';
       return {
-        key: goLeft ? 'STOP_TURN_LEFT' : 'STOP_TURN_RIGHT',
+        key: `${noun ?? 'STOP'}_TURN_${goLeft ? 'L' : 'R'}`,
         text:
           lang === 'ru'
-            ? goLeft
-              ? 'Стоп, поверни влево'
-              : 'Стоп, поверни вправо'
-            : goLeft
-              ? 'Stop, turn left'
-              : 'Stop, turn right',
+            ? `${prefix}${goLeft ? 'стоп, влево' : 'стоп, вправо'}`
+            : `${prefix}${goLeft ? 'stop, turn left' : 'stop, turn right'}`,
         urgent: true,
       };
     }
     return {
-      key: 'STOP',
-      text: lang === 'ru' ? 'Стоп' : 'Stop',
+      key: noun ? `STOP_${objLabel ?? 'WALL'}` : 'STOP',
+      text: noun
+        ? lang === 'ru'
+          ? `${noun}, стоп`
+          : `${noun}, stop`
+        : lang === 'ru'
+          ? 'Стоп'
+          : 'Stop',
       urgent: true,
     };
   }
   if (guidance.steering === 'VEER_LEFT') {
     const isDanger = guidance.overall_severity === 'danger';
+    const noun = objLabel ? formatObjName(objLabel, lang) : null;
     return {
-      key: isDanger ? 'DANGER_LEFT' : 'CAUTION_LEFT',
-      text: lang === 'ru' ? 'Левее' : 'Left',
+      key: `${isDanger ? 'DANGER' : 'CAUTION'}_LEFT_${objLabel ?? 'GEN'}`,
+      text: noun
+        ? lang === 'ru'
+          ? `${noun}, левее`
+          : `${noun}, left`
+        : lang === 'ru'
+          ? 'Левее'
+          : 'Left',
       urgent: isDanger,
     };
   }
   if (guidance.steering === 'VEER_RIGHT') {
     const isDanger = guidance.overall_severity === 'danger';
+    const noun = objLabel ? formatObjName(objLabel, lang) : null;
     return {
-      key: isDanger ? 'DANGER_RIGHT' : 'CAUTION_RIGHT',
-      text: lang === 'ru' ? 'Правее' : 'Right',
+      key: `${isDanger ? 'DANGER' : 'CAUTION'}_RIGHT_${objLabel ?? 'GEN'}`,
+      text: noun
+        ? lang === 'ru'
+          ? `${noun}, правее`
+          : `${noun}, right`
+        : lang === 'ru'
+          ? 'Правее'
+          : 'Right',
       urgent: isDanger,
     };
   }
@@ -138,6 +317,15 @@ export class SpatialAudioEngine {
 
   public unlock(): void {
     if (typeof window === 'undefined') return;
+    // iOS 17+ Safari: switch audio session to 'playback' so headphones/speaker work even if mute switch is on
+    try {
+      const nav = navigator as unknown as { audioSession?: { type?: string } };
+      if (nav.audioSession && nav.audioSession.type !== 'playback') {
+        nav.audioSession.type = 'playback';
+      }
+    } catch {
+      // Ignore on browsers without navigator.audioSession
+    }
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||
@@ -155,8 +343,20 @@ export class SpatialAudioEngine {
         this.compressor = comp;
       }
     }
-    if (this.ctx && this.ctx.state === 'suspended') {
-      void this.ctx.resume();
+    if (this.ctx) {
+      if (this.ctx.state === 'suspended') {
+        void this.ctx.resume();
+      }
+      // iOS Safari gesture unlock: trigger a 1-sample silent buffer so Bluetooth/AirPods wake immediately
+      try {
+        const silentBuf = this.ctx.createBuffer(1, 1, 22050);
+        const src = this.ctx.createBufferSource();
+        src.buffer = silentBuf;
+        src.connect(this.ctx.destination);
+        src.start(0);
+      } catch {
+        // Ignore if context is closed or mocked
+      }
     }
   }
 
@@ -324,12 +524,70 @@ export class SpatialAudioEngine {
     this.speakNow(text, true, true);
   }
 
+  /** Cross-platform L -> Center -> R stereo sweep to verify AirPods / Android headphones */
+  public playHeadphonesLRTest(): void {
+    this.unlock();
+    if (!this.ctx || !this.compressor) return;
+    const t0 = this.ctx.currentTime;
+    this.scheduleStereoTone({ startTime: t0, freqStart: 480, freqEnd: 480, durationSec: 0.14, pan: -0.9, volume: 0.22 });
+    this.scheduleStereoTone({ startTime: t0 + 0.22, freqStart: 600, freqEnd: 600, durationSec: 0.14, pan: 0.0, volume: 0.22 });
+    this.scheduleStereoTone({ startTime: t0 + 0.44, freqStart: 740, freqEnd: 740, durationSec: 0.14, pan: 0.9, volume: 0.22 });
+  }
+
+  private handleHeadphones3D(guidance: GuidancePayload, now: number): void {
+    const plan = computeHeadphonesCue(guidance);
+    if (plan.kind === 'silence') {
+      this.lastRank = 0;
+      return;
+    }
+
+    if (this.sonarEnabled && now - this.lastPingAt >= plan.intervalMs) {
+      this.lastPingAt = now;
+      this.unlock();
+      if (this.ctx && this.compressor) {
+        const t0 = this.ctx.currentTime;
+        this.scheduleStereoTone({
+          startTime: t0,
+          freqStart: plan.freqStart,
+          freqEnd: plan.freqEnd,
+          durationSec: plan.kind === 'stairs' ? 0.12 : 0.085,
+          pan: plan.pan,
+          volume: plan.volume,
+        });
+        if (plan.doublePulse) {
+          this.scheduleStereoTone({
+            startTime: t0 + 0.11,
+            freqStart: plan.kind === 'stairs' ? plan.freqEnd : plan.freqStart,
+            freqEnd: plan.kind === 'stairs' ? Math.max(260, plan.freqEnd - 120) : plan.freqEnd,
+            durationSec: 0.09,
+            pan: plan.pan,
+            volume: plan.volume,
+          });
+        }
+      }
+    }
+
+    // Optional crisp voice callout on new urgent hazard while wearing headphones
+    if (this.voiceEnabled) {
+      const callout = getCrispCallout(guidance, this.voiceLang);
+      if (callout && (callout.key !== this.lastSpokenKey || now - this.lastSpokenAt >= 4500)) {
+        this.lastSpokenKey = callout.key;
+        this.lastSpokenAt = now;
+        this.speakNow(callout.text, callout.urgent, false);
+      }
+    }
+  }
+
   public handleGuidance(guidance: GuidancePayload): void {
     if (this.profile === 'tactile_only') return;
 
     const now = performance.now();
     if (this.profile === 'metal_detector') {
       this.handleMetalDetectorAudio(guidance, now);
+      return;
+    }
+    if (this.profile === 'headphones_3d') {
+      this.handleHeadphones3D(guidance, now);
       return;
     }
 
@@ -684,6 +942,73 @@ export class SpatialAudioEngine {
     }
     const diff = guidance.right.obstacle_score - guidance.left.obstacle_score;
     return clamp(diff * 2.2, -1.15, 1.15);
+  }
+
+  /**
+   * Cross-platform stereo panning: uses StereoPannerNode (Android Chrome & iOS 14.5+)
+   * with automatic PannerNode equalpower fallback for older iOS WebKit builds.
+   */
+  private scheduleStereoTone(opts: {
+    startTime: number;
+    freqStart: number;
+    freqEnd: number;
+    durationSec: number;
+    pan: number;
+    volume: number;
+  }): void {
+    if (!this.ctx || !this.compressor) return;
+    const { startTime, freqStart, freqEnd, durationSec, pan, volume } = opts;
+    const clampedPan = clamp(pan, -1, 1);
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = freqStart < 320 ? 'sine' : 'triangle';
+    osc.frequency.setValueAtTime(Math.max(60, freqStart), startTime);
+    if (Math.abs(freqEnd - freqStart) > 1) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(60, freqEnd), startTime + durationSec);
+    }
+
+    gain.gain.setValueAtTime(0.0008, startTime);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.002, volume), startTime + Math.min(0.014, durationSec * 0.3));
+    gain.gain.exponentialRampToValueAtTime(0.0008, startTime + durationSec);
+    osc.connect(gain);
+
+    let panNode: AudioNode | null = null;
+    if (typeof this.ctx.createStereoPanner === 'function') {
+      const sp = this.ctx.createStereoPanner();
+      sp.pan.setValueAtTime(clampedPan, startTime);
+      gain.connect(sp);
+      sp.connect(this.compressor);
+      panNode = sp;
+    } else if (typeof this.ctx.createPanner === 'function') {
+      const p = this.ctx.createPanner();
+      p.panningModel = 'equalpower';
+      const z = -Math.sqrt(Math.max(0.05, 1 - clampedPan * clampedPan));
+      if (p.positionX) {
+        p.positionX.setValueAtTime(clampedPan, startTime);
+        p.positionY.setValueAtTime(0, startTime);
+        p.positionZ.setValueAtTime(z, startTime);
+      } else {
+        p.setPosition(clampedPan, 0, z);
+      }
+      gain.connect(p);
+      p.connect(this.compressor);
+      panNode = p;
+    } else {
+      gain.connect(this.compressor);
+    }
+
+    osc.onended = () => {
+      try {
+        osc.disconnect();
+        gain.disconnect();
+        panNode?.disconnect();
+      } catch {
+        // Ignore already-disconnected nodes
+      }
+    };
+    osc.start(startTime);
+    osc.stop(startTime + durationSec + 0.015);
   }
 
   private schedule3DPing(opts: {

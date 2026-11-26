@@ -489,18 +489,49 @@ export class SpatialMemoryEngine {
     const blindRightDanger = blindRight.prob >= 0.82 && blindRight.minDist <= 1.75;
 
     // 5. ANTI-HALLUCINATION + CROSS-ELEVATION FUSION!
-    //    Case A: Raw single frame claims a sudden hazard, BUT 3D multi-frame voxel map has NOT
-    //            confirmed it yet (`prob < 0.82`) -> suppress 1-frame hallucination!
-    //    Case B: Phone is aimed DOWN at floor (`cameraBand === 'down'`, raw sees `CLEAR`),
-    //            BUT `MID` or `UP` remembers a wall/chair/overhang `<= 1.6m` ahead -> WARN!
-    //    Case C: Phone is aimed UP/MID (`cameraBand !== 'down'`), BUT `DOWN` remembers a curb `<= 1.6m` ahead -> WARN!
+    //    - NEVER suppress confirmed backend `danger`, `wall_override`, `lens_blocked`, `curb.detected`,
+    //      `overhead_hazard`, or close high-confidence YOLO objects (`<= 1.5m`) — especially during
+    //      `motionGated` hand swings/turns! (Rust already debounces via `confirm_frames = 2`.)
+    //    - Use 3D voxel memory for: (a) mild single-frame `caution` flicker filtering,
+    //      (b) cross-elevation persistence (UP/MID/DOWN), and (c) 360° blind-spot veto.
+
+    const hasCloseYoloInCorridor = (corridor: 'left' | 'center' | 'right'): boolean =>
+      Boolean(
+        raw.objects?.some(
+          (obj) =>
+            obj.corridor === corridor &&
+            obj.confidence >= 0.4 &&
+            obj.distance_m <= 1.5 &&
+            obj.severity !== 'clear'
+        )
+      );
 
     const toConfirmedZone = (
+      corridor: 'left' | 'center' | 'right',
       rawZ: ZoneMetrics,
       memSec: { prob: number; minDist: number }
     ): { zone: ZoneMetrics; suppressed: boolean } => {
-      // NEVER suppress confirmed close blank/white walls (`wall_override`) or covered lens!
-      if (raw.lens_blocked || raw.wall_override) return { zone: rawZ, suppressed: false };
+      // NEVER suppress urgent hazards (`danger`, `wall_override`, `lens_blocked`) or close YOLO objects!
+      if (
+        raw.lens_blocked ||
+        raw.wall_override ||
+        rawZ.severity === 'danger' ||
+        hasCloseYoloInCorridor(corridor)
+      ) {
+        // Still merge tighter distance from 3D memory if memory remembers something even closer
+        if (memSec.prob >= 0.81 && memSec.minDist < rawZ.min_distance_m) {
+          return {
+            zone: {
+              severity: maxSeverity(rawZ.severity, memSec.minDist <= 1.85 ? 'danger' : 'caution'),
+              obstacle_score: Math.max(rawZ.obstacle_score, Number(memSec.prob.toFixed(3))),
+              min_distance_m: Number(memSec.minDist.toFixed(2)),
+              coverage_ratio: Math.max(rawZ.coverage_ratio, 0.35),
+            },
+            suppressed: false,
+          };
+        }
+        return { zone: rawZ, suppressed: false };
+      }
 
       // Confirmed by 3D multi-frame memory (across ANY elevation band: UP, MID, DOWN, or 20kHz Sonar!)
       if (memSec.prob >= 0.81 && memSec.minDist <= 1.85) {
@@ -517,17 +548,17 @@ export class SpatialMemoryEngine {
       if (memSec.prob >= 0.78 && memSec.minDist <= 2.4) {
         return {
           zone: {
-            severity: rawZ.severity === 'danger' ? 'caution' : maxSeverity(rawZ.severity, 'caution'),
+            severity: maxSeverity(rawZ.severity, 'caution'),
             obstacle_score: Math.max(0.28, Math.min(rawZ.obstacle_score, 0.42)),
             min_distance_m: Math.min(rawZ.min_distance_m, Number(memSec.minDist.toFixed(2))),
             coverage_ratio: rawZ.coverage_ratio,
           },
-          suppressed: rawZ.severity === 'danger',
+          suppressed: false,
         };
       }
 
-      // Single-frame raw spike NOT backed by multi-frame spatial consensus -> suppress flicker!
-      if (rawZ.severity !== 'clear') {
+      // Mild single-frame `caution` spike NOT backed by multi-frame spatial consensus -> suppress flicker!
+      if (rawZ.severity === 'caution') {
         return {
           zone: {
             severity: 'clear',
@@ -541,20 +572,23 @@ export class SpatialMemoryEngine {
       return { zone: rawZ, suppressed: false };
     };
 
-    const fL = toConfirmedZone(raw.left, fwdLeft3D);
-    const fC = toConfirmedZone(raw.center, fwdCenter3D);
-    const fR = toConfirmedZone(raw.right, fwdRight3D);
+    const fL = toConfirmedZone('left', raw.left, fwdLeft3D);
+    const fC = toConfirmedZone('center', raw.center, fwdCenter3D);
+    const fR = toConfirmedZone('right', raw.right, fwdRight3D);
 
+    // NEVER suppress live Rust-confirmed `curb.detected` or `overhead_hazard` (also preserve remembered ones!)
     const rawHadCurb = raw.curb.detected || raw.steering === 'CURB_DROP';
-    const confirmedCurb = !raw.lens_blocked && downAhead.hasCurb && downAhead.prob >= 0.83 && downAhead.minDist <= 2.1;
-    const curbSuppressed = rawHadCurb && !confirmedCurb;
+    const rememberedCurb =
+      downAhead.hasCurb && downAhead.prob >= 0.83 && downAhead.minDist <= 2.1;
+    const confirmedCurb = !raw.lens_blocked && (rawHadCurb || rememberedCurb);
 
-    if (fL.suppressed || fC.suppressed || fR.suppressed || curbSuppressed) {
+    if (fL.suppressed || fC.suppressed || fR.suppressed) {
       this.filteredFlickers += 1;
     }
 
     const confirmedOverhead =
-      !raw.lens_blocked && upAhead.prob >= 0.83 && upAhead.minDist <= 1.8;
+      !raw.lens_blocked &&
+      (Boolean(raw.overhead_hazard) || (upAhead.prob >= 0.83 && upAhead.minDist <= 1.8));
 
     // Recompute Lean-4 verified steering on the 3D-confirmed + blind-spot-protected zones!
     let overall: Severity = maxSeverity(
@@ -573,12 +607,14 @@ export class SpatialMemoryEngine {
       steering = 'STOP';
     } else if (confirmedCurb) {
       steering = 'CURB_DROP';
-      if (cameraBand !== 'down') {
+      if (rememberedCurb && !rawHadCurb && cameraBand !== 'down') {
         memoryHint = `Remembered step/curb below (${downAhead.minDist.toFixed(1)}m ahead)`;
       }
-    } else if (confirmedOverhead && cameraBand === 'down') {
+    } else if (confirmedOverhead && (Boolean(raw.overhead_hazard) || cameraBand === 'down')) {
       steering = 'STOP';
-      memoryHint = `Remembered head overhang above (${upAhead.minDist.toFixed(1)}m ahead)`;
+      if (!raw.overhead_hazard) {
+        memoryHint = `Remembered head overhang above (${upAhead.minDist.toFixed(1)}m ahead)`;
+      }
     } else if (fC.zone.severity === 'danger') {
       const leftSafe = fL.zone.severity !== 'danger' && !blindLeftDanger;
       const rightSafe = fR.zone.severity !== 'danger' && !blindRightDanger;

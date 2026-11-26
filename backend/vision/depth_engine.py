@@ -50,6 +50,12 @@ ONNX_MODELS = {
         "depth-anything/Depth-Anything-V2-Small-Q8",
         280,
     ),
+    "small-fp16": (
+        "depth_anything_v2_small_fp16.onnx",
+        "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
+        "depth-anything/Depth-Anything-V2-Small-FP16",
+        280,
+    ),
     "base": (
         "depth_anything_v2_base_fp16.onnx",
         "https://huggingface.co/onnx-community/depth-anything-v2-base/resolve/main/onnx/model_fp16.onnx",
@@ -264,6 +270,12 @@ class DepthEngine:
                     else ("large" if self.device == "cuda-rtx" else ("base" if has_gpu else "small"))
                 )
                 fname, url, display_name, tier_max_w = ONNX_MODELS[tier]
+                # Int8 quantized Small-Q8 causes 237 CPU<->GPU Memcpy ops on CUDAExecutionProvider (slower than CPU!).
+                # Keep Q8 models strictly on CPUExecutionProvider for fast ~25ms inference.
+                if "quantized" in fname or "q8" in fname:
+                    providers = ["CPUExecutionProvider"]
+                    self.device = "cpu-ort"
+                    has_gpu = False
                 onnx_path = CACHE_DIR / fname
                 if not onnx_path.exists():
                     urllib.request.urlretrieve(url, str(onnx_path))
