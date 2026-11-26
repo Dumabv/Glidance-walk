@@ -12,8 +12,10 @@ import threading
 import time
 from typing import Any
 
+from urllib.parse import urlparse
+
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -52,6 +54,84 @@ def get_lan_ip() -> str:
         return "127.0.0.1"
 
 
+def _classify_ipv4(ip: str) -> tuple[int, str] | None:
+    """Ranks local IPv4 addresses so Mobile Hotspot interfaces come before campus Wi-Fi.
+    Returns (priority, label) or None if loopback / link-local / VirtualBox host-only.
+    """
+    if (
+        not ip
+        or ip.startswith("127.")
+        or ip.startswith("169.254.")
+        or ip.startswith("192.168.56.")  # VirtualBox Host-Only
+    ):
+        return None
+    if ip.startswith("192.168.137."):
+        return (0, f"Hotspot ({ip})")
+    if ip.startswith("172.20.10."):
+        return (0, f"iOS Hotspot ({ip})")
+    if ip.startswith("192.168."):
+        return (1, f"Wi-Fi LAN ({ip})")
+    if ip.startswith("10."):
+        return (2, f"Campus LAN ({ip})")
+    if ip.startswith("172."):
+        # Filter out typical WSL/Docker internal bridges (172.17-31.x.1) except real subnets
+        parts = ip.split(".")
+        if len(parts) == 4 and parts[3] == "1":
+            return None
+        return (3, f"LAN ({ip})")
+    return (3, f"Network ({ip})")
+
+
+def get_candidate_lan_ips() -> list[tuple[str, str]]:
+    """Returns deduplicated (ip, label) pairs sorted with Hotspot first."""
+    raw_ips: list[str] = []
+    primary = get_lan_ip()
+    if primary and primary != "127.0.0.1":
+        raw_ips.append(primary)
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            addr = info[4][0]
+            if isinstance(addr, str) and addr not in raw_ips:
+                raw_ips.append(addr)
+    except OSError:
+        pass
+
+    scored: list[tuple[int, int, str, str]] = []
+    for idx, ip in enumerate(raw_ips):
+        meta = _classify_ipv4(ip)
+        if meta is not None:
+            prio, label = meta
+            # Prefer default-route IP within the same priority tier
+            scored.append((prio, idx, ip, label))
+
+    scored.sort(key=lambda item: (item[0], item[1]))
+    if not scored:
+        return [("127.0.0.1", "Localhost (127.0.0.1)")]
+    return [(ip, label) for _, _, ip, label in scored]
+
+
+def _normalize_external_origin(raw_url: str | None) -> str | None:
+    """Extracts clean https://domain origin if it is a non-loopback domain or tunnel."""
+    if not raw_url:
+        return None
+    candidate = raw_url.strip()
+    if not candidate:
+        return None
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host or host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return None
+    scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "https"
+    netloc = parsed.netloc or host
+    return f"{scheme}://{netloc}"
+
+
 class SaveSampleRequest(BaseModel):
     label: SampleLabel
     note: str = ""
@@ -60,6 +140,10 @@ class SaveSampleRequest(BaseModel):
 
 class SimulateSceneRequest(BaseModel):
     scene_id: str
+
+
+class PublicOriginRequest(BaseModel):
+    public_origin: str | None = None
 
 
 class AppState:
@@ -79,6 +163,9 @@ class AppState:
         self.recent_latencies_ms: deque[float] = deque(maxlen=120)
         self.last_dashboard_push_at: float = 0.0
         self.dashboard_push_in_flight: bool = False
+        self.public_origin: str | None = _normalize_external_origin(
+            os.getenv("GLIDANCE_PUBLIC_URL")
+        )
 
     @property
     def phone_connected(self) -> bool:
@@ -163,15 +250,88 @@ def health() -> dict[str, Any]:
     }
 
 
-@app.get("/api/network-info")
-def network_info() -> dict[str, Any]:
-    lan_ip = get_lan_ip()
+def _maybe_capture_external_origin(headers: dict[str, str]) -> bool:
+    """Auto-discovers public tunnel domain (e.g. *.trycloudflare.com) from Origin/Referer headers."""
+    for key in ("origin", "referer", "x-forwarded-host"):
+        val = headers.get(key)
+        if not val:
+            continue
+        norm = _normalize_external_origin(val)
+        if not norm:
+            continue
+        host = (urlparse(norm).hostname or "").lower()
+        # Only auto-promote domain names (tunnels), not raw LAN IPs
+        is_ipv4 = all(part.isdigit() for part in host.split(".")) and len(host.split(".")) == 4
+        if not is_ipv4:
+            with state._lock:
+                if state.public_origin != norm:
+                    state.public_origin = norm
+                    return True
+    return False
+
+
+def build_network_info_payload() -> dict[str, Any]:
     frontend_port = int(os.getenv("GLIDANCE_FRONTEND_PORT", "5173"))
+    ip_candidates = get_candidate_lan_ips()
+    top_ip = ip_candidates[0][0]
+
+    candidates: list[dict[str, str]] = []
+    with state._lock:
+        pub_origin = state.public_origin
+
+    if pub_origin:
+        candidates.append(
+            {
+                "label": f"Tunnel ({urlparse(pub_origin).hostname or pub_origin})",
+                "mobile_url": f"{pub_origin}/?mode=mobile",
+                "kind": "tunnel",
+            }
+        )
+
+    for ip, label in ip_candidates:
+        kind = "hotspot" if "hotspot" in label.lower() else "lan"
+        candidates.append(
+            {
+                "label": label,
+                "mobile_url": f"https://{ip}:{frontend_port}/?mode=mobile",
+                "kind": kind,
+            }
+        )
+
+    primary_mobile_url = (
+        candidates[0]["mobile_url"]
+        if candidates
+        else f"https://{top_ip}:{frontend_port}/?mode=mobile"
+    )
     return {
-        "lan_ip": lan_ip,
-        "mobile_url": f"https://{lan_ip}:{frontend_port}/?mode=mobile",
-        "dashboard_url": f"https://{lan_ip}:{frontend_port}/",
+        "lan_ip": top_ip,
+        "mobile_url": primary_mobile_url,
+        "dashboard_url": f"https://{top_ip}:{frontend_port}/",
+        "public_origin": pub_origin,
+        "candidates": candidates,
+        "session_locked": state.phone_connected,
     }
+
+
+@app.get("/api/network-info")
+async def network_info(request: Request) -> dict[str, Any]:
+    changed = _maybe_capture_external_origin(
+        {k.lower(): v for k, v in request.headers.items()}
+    )
+    payload = build_network_info_payload()
+    if changed:
+        await broadcast_dashboard({"type": "network_info", "network_info": payload})
+    return payload
+
+
+@app.put("/api/network-info/public-origin")
+async def set_public_origin(req: PublicOriginRequest) -> dict[str, Any]:
+    norm = _normalize_external_origin(req.public_origin) if req.public_origin else None
+    with state._lock:
+        state.public_origin = norm
+    payload = build_network_info_payload()
+    await broadcast_dashboard({"type": "network_info", "network_info": payload})
+    return payload
 
 
 @app.get("/api/calibration", response_model=CalibrationConfig)
@@ -408,12 +568,35 @@ def _process_frame_critical_path(
 @app.websocket("/ws/phone")
 async def phone_stream_ws(websocket: WebSocket) -> None:
     await websocket.accept()
+    if _maybe_capture_external_origin({k.lower(): v for k, v in websocket.headers.items()}):
+        await broadcast_dashboard(
+            {"type": "network_info", "network_info": build_network_info_payload()}
+        )
 
     with state._lock:
-        conn_id = state.next_conn_id
-        state.next_conn_id += 1
-        detector = GroundAwareHazardDetector(config=state.config)
-        state.active_phone_detectors[conn_id] = detector
+        if len(state.active_phone_detectors) > 0:
+            locked = True
+            conn_id = -1
+            detector: GroundAwareHazardDetector | None = None
+        else:
+            locked = False
+            conn_id = state.next_conn_id
+            state.next_conn_id += 1
+            detector = GroundAwareHazardDetector(config=state.config)
+            state.active_phone_detectors[conn_id] = detector
+
+    if locked or detector is None:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "session_locked",
+                    "code": "SESSION_LOCKED",
+                    "message": "Another phone is currently streaming a live walk. Wait until the active session ends.",
+                }
+            )
+        )
+        await websocket.close(code=4009, reason="SESSION_LOCKED")
+        return
 
     await broadcast_dashboard({"type": "status", "phone_connected": True})
 

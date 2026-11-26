@@ -200,6 +200,8 @@ export function MobileWalker() {
 
   useEffect(() => {
     hapticsRef.current?.attachIosSwitchFallback(iosSwitchLabelRef.current);
+    // Ping network-info on mount so backend auto-captures public tunnel Referer/Origin for projector QR
+    void fetch('/api/network-info').catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -594,15 +596,34 @@ export function MobileWalker() {
 
       ws.onmessage = (event) => {
         try {
-          const data: GuidancePayload = JSON.parse(event.data);
-          handleIncomingGuidance(data);
+          const parsed = JSON.parse(event.data) as GuidancePayload & {
+            type?: string;
+            code?: string;
+            message?: string;
+          };
+          if (parsed.type === 'session_locked' || parsed.code === 'SESSION_LOCKED') {
+            stopSession();
+            setErrorMsg(
+              parsed.message ??
+                'Another phone is currently streaming a live walk. Wait until the active session ends.'
+            );
+            return;
+          }
+          handleIncomingGuidance(parsed);
         } catch {
           inFlightRef.current = false;
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setWsConnected(false);
+        if (event.code === 4009) {
+          stopSession();
+          setErrorMsg(
+            'Another phone is currently streaming a live walk. Wait until the active session ends.'
+          );
+          return;
+        }
         if (!sessionActiveRef.current) return;
         const delay = Math.min(2500, 300 * Math.pow(1.7, attempt));
         reconnectTimerRef.current = window.setTimeout(
