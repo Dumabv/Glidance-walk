@@ -38,6 +38,11 @@ DEFAULT_PHOTOS_META = FIXTURES_DIR / "real_photos_meta.json"
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(
         description="Replay pre-baked classroom photos + 71s walk trace as a fast CI quality gate."
     )
