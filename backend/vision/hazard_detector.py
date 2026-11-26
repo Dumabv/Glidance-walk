@@ -375,13 +375,19 @@ class GroundAwareHazardDetector:
                 if (
                     prev_code < 2
                     and prev_code <= new_code
-                    and (prev_z.obstacle_score - new_z.obstacle_score) < 0.18
+                    and (prev_z.obstacle_score - new_z.obstacle_score) < 0.22
                 ):
                     steering = prev_steer
                     if steering == "VEER_LEFT":
-                        spoken = spoken.replace("Step right.", "Step left.").replace("Move right.", "Move left.")
+                        if "on left" in spoken.lower():
+                            spoken = "Obstacle ahead. Step left."
+                        else:
+                            spoken = spoken.replace("Step right.", "Step left.").replace("Move right.", "Move left.")
                     else:
-                        spoken = spoken.replace("Step left.", "Step right.").replace("Move left.", "Move right.")
+                        if "on right" in spoken.lower():
+                            spoken = "Obstacle ahead. Step right."
+                        else:
+                            spoken = spoken.replace("Step left.", "Step right.").replace("Move left.", "Move right.")
             self._last_steer = steering
 
         if steering != fused.steering or spoken != fused.spoken_cue:
@@ -962,20 +968,28 @@ def fuse_yolo_with_verified_hazard(
             else:
                 spoken = "Path blocked ahead. Stop."
         elif steering == "VEER_LEFT":
-            target = c_named or r_named
+            target = min(
+                (x for x in (c_named, r_named) if x is not None),
+                key=lambda o: o.distance_m,
+                default=None,
+            )
             if target is not None:
                 eff_dist = min(target.distance_m, zones[target.corridor].min_distance_m)
                 where = "ahead" if target.corridor == "center" else "on right"
                 spoken = f"{target.label.capitalize()} {where} ({eff_dist:.1f}m). Step left."
-            elif spoken == "Path clear." or curb_suppressed:
+            elif spoken == "Path clear." or curb_suppressed or "step right" in spoken.lower() or "on left" in spoken.lower():
                 spoken = "Obstacle on right. Step left."
         elif steering == "VEER_RIGHT":
-            target = c_named or l_named
+            target = min(
+                (x for x in (c_named, l_named) if x is not None),
+                key=lambda o: o.distance_m,
+                default=None,
+            )
             if target is not None:
                 eff_dist = min(target.distance_m, zones[target.corridor].min_distance_m)
                 where = "ahead" if target.corridor == "center" else "on left"
                 spoken = f"{target.label.capitalize()} {where} ({eff_dist:.1f}m). Step right."
-            elif spoken == "Path clear." or curb_suppressed:
+            elif spoken == "Path clear." or curb_suppressed or "step left" in spoken.lower() or "on right" in spoken.lower():
                 spoken = "Obstacle on left. Step right."
         elif steering == "CLEAR":
             spoken = "Path clear."

@@ -171,7 +171,6 @@ def run_video_profile(
             yolo_ms = det_res.yolo_ms
             objs = det_res.objects
             haz = hazard_det.fuse_objects(haz, objs, stateful=True)
-            haz = fuse_yolo_with_verified_hazard(haz, objs, cfg)
 
         total_ms = (time.perf_counter() - t0) * 1000.0
         latencies.append(total_ms)
