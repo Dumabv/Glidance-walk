@@ -263,3 +263,44 @@ def test_onnx_relative_fallback_resets_is_metric_flag() -> None:
     raw_disparity = np.linspace(1.0, 10.0, 120 * 160, dtype=np.float32).reshape(120, 160)
     closeness, _ = eng._normalize_depth_fast(raw_disparity)
     assert float(np.mean(closeness[-10:, :])) > float(np.mean(closeness[:10, :]))
+
+
+def test_benchmark_runner_applies_yolo_fusion_on_real_samples(tmp_path) -> None:
+    """Real benchmark photos must run through YOLOv8n fusion when detector is active."""
+    from backend.evaluation.benchmark_runner import run_benchmark
+    from backend.evaluation.dataset_store import DatasetStore
+    from backend.vision.depth_engine import DepthEngine
+    from backend.vision.object_detector import ObjectDetectionResult
+
+    class _StubObjectDetector:
+        is_active = True
+
+        def detect(self, image, depth_meters, max_objects: int = 6):
+            return ObjectDetectionResult(
+                objects=[
+                    DetectedObject(
+                        label="chair",
+                        confidence=0.91,
+                        distance_m=1.05,
+                        corridor="center",
+                        bbox_norm=[0.35, 0.30, 0.65, 0.85],
+                        severity="danger",
+                    )
+                ],
+                yolo_ms=7.5,
+            )
+
+    store = DatasetStore(data_dir=tmp_path)
+    store.save_sample(_make_jpeg(), "obstacle_center", "Classroom chair 1.0m")
+
+    report = run_benchmark(
+        depth_engine=DepthEngine(use_mock=True),
+        dataset_store=store,
+        config=CalibrationConfig(),
+        include_synthetic=False,
+        object_detector=_StubObjectDetector(),  # type: ignore[arg-type]
+    )
+    assert report.real_samples == 1
+    assert report.samples[0].smart_correct is True
+    assert report.samples[0].smart_severity == "danger"
+    assert report.samples[0].smart_ms >= 7.5

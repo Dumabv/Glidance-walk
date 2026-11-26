@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import sys
 import threading
@@ -12,7 +12,9 @@ import numpy as np
 
 from backend.schemas import (
     CalibrationConfig,
+    Corridor,
     CurbMetrics,
+    DetectedObject,
     Severity,
     SteeringAction,
     ZoneMetrics,
@@ -665,3 +667,100 @@ class GroundAwareHazardDetector:
             wall_override=wall_ov_any,
             overhead_hazard=overhead_hazard,
         )
+
+
+_SEV_TO_CODE: dict[Severity, int] = {"clear": 0, "caution": 1, "danger": 2}
+
+
+def fuse_yolo_with_verified_hazard(
+    haz: HazardResult,
+    objects: list[DetectedObject],
+    config: CalibrationConfig,
+) -> HazardResult:
+    """Enriches corridor distances & spoken cues with YOLOv8n while preserving Lean 4 invariants."""
+    if not objects or haz.lens_blocked:
+        return haz
+
+    nearest_by_corridor: dict[Corridor, DetectedObject] = {}
+    for obj in objects:
+        if obj.confidence < 0.40 or obj.severity == "clear":
+            continue
+        cur = nearest_by_corridor.get(obj.corridor)
+        if cur is None or obj.distance_m < cur.distance_m:
+            nearest_by_corridor[obj.corridor] = obj
+
+    if not nearest_by_corridor:
+        return haz
+
+    zones: dict[Corridor, ZoneMetrics] = {
+        "left": haz.left,
+        "center": haz.center,
+        "right": haz.right,
+    }
+    upgraded = False
+    for side, obj in nearest_by_corridor.items():
+        z = zones[side]
+        new_dist = round(min(z.min_distance_m, obj.distance_m), 2)
+        new_sev = z.severity
+        new_score = z.obstacle_score
+        if _SEV_TO_CODE[obj.severity] > _SEV_TO_CODE[z.severity]:
+            new_sev = obj.severity
+            upgraded = True
+            if obj.severity == "danger":
+                new_score = max(new_score, min(1.0, config.danger_threshold + 0.14))
+            elif obj.severity == "caution":
+                new_score = max(new_score, min(1.0, config.caution_threshold + 0.06))
+        zones[side] = ZoneMetrics(
+            severity=new_sev,
+            obstacle_score=round(new_score, 4),
+            min_distance_m=new_dist,
+            coverage_ratio=z.coverage_ratio,
+        )
+
+    left_z, center_z, right_z = zones["left"], zones["center"], zones["right"]
+    overall_sev = haz.overall_severity
+    steering = haz.steering
+
+    # Re-run Lean-4 verified decision core whenever YOLO upgrades any corridor severity
+    if upgraded and not haz.overhead_hazard and not haz.wall_override:
+        ov_code, act_code = decide_guidance_verified(
+            _SEV_TO_CODE[left_z.severity],
+            int(round(left_z.obstacle_score * 1000)),
+            _SEV_TO_CODE[center_z.severity],
+            int(round(center_z.obstacle_score * 1000)),
+            _SEV_TO_CODE[right_z.severity],
+            int(round(right_z.obstacle_score * 1000)),
+            haz.curb.detected,
+            True,
+        )
+        overall_sev = SEVERITY_BY_CODE[ov_code]
+        steering = STEERING_BY_CODE[act_code]
+
+    # Enrich spoken_cue with the nearest named object without overriding curb/overhead/wall cues
+    spoken = haz.spoken_cue
+    if not haz.curb.detected and not haz.overhead_hazard:
+        c_obj = nearest_by_corridor.get("center")
+        l_obj = nearest_by_corridor.get("left")
+        r_obj = nearest_by_corridor.get("right")
+        if steering == "STOP" and c_obj is not None:
+            spoken = f"{c_obj.label.capitalize()} blocking path at {c_obj.distance_m:.1f}m. Stop."
+        elif steering == "VEER_LEFT":
+            target = c_obj or r_obj
+            if target is not None:
+                where = "ahead" if target.corridor == "center" else "on right"
+                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step left."
+        elif steering == "VEER_RIGHT":
+            target = c_obj or l_obj
+            if target is not None:
+                where = "ahead" if target.corridor == "center" else "on left"
+                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step right."
+
+    return replace(
+        haz,
+        overall_severity=overall_sev,
+        steering=steering,
+        spoken_cue=spoken,
+        left=left_z,
+        center=center_z,
+        right=right_z,
+    )

@@ -4,8 +4,12 @@ import {
   CameraOff,
   ChevronDown,
   ChevronUp,
+  Film,
   Lock,
+  Pause,
+  Play,
   Radio,
+  RotateCcw,
   Save,
   Smartphone,
   SwitchCamera,
@@ -88,8 +92,18 @@ const QUICK_LABELS: { label: SampleLabel; text: string }[] = [
   { label: 'curb_drop', text: 'Curb / Step' },
 ];
 
+function formatVideoTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
+  const total = Math.floor(seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function MobileWalker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const videoObjectUrlRef = useRef<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -102,6 +116,8 @@ export function MobileWalker() {
   const sessionActiveRef = useRef(false);
   const sessionIdRef = useRef(0);
   const switchingCameraRef = useRef(false);
+  const videoFileModeRef = useRef(false);
+  const videoPausedRef = useRef(false);
   const inFlightRef = useRef(false);
   const encodingRef = useRef(false);
   const lastSendAtRef = useRef(0);
@@ -114,6 +130,12 @@ export function MobileWalker() {
   const [facingMode, setFacingMode] = useState<CameraFacingMode>('environment');
   const [cameraDeviceLabel, setCameraDeviceLabel] = useState<string | null>(null);
   const [switchingCamera, setSwitchingCamera] = useState(false);
+  const [videoFileName, setVideoFileName] = useState<string | null>(null);
+  const [videoPaused, setVideoPaused] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoRate, setVideoRate] = useState<0.5 | 1>(1);
+  const [videoLoop, setVideoLoop] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
   const [signalLost, setSignalLost] = useState(false);
   const [tiltWarning, setTiltWarning] = useState<string | null>(null);
@@ -143,7 +165,7 @@ export function MobileWalker() {
   const frameTimestampsRef = useRef<number[]>([]);
   const smoothedRttRef = useRef<number>(250);
   const videoAspectRef = useRef<'portrait' | 'landscape'>('portrait');
-  const dispatchFrameRef = useRef<() => void>(() => {});
+  const dispatchFrameRef = useRef<(force?: boolean) => void>(() => {});
   const lastAnnouncedSteeringRef = useRef<string | null>(null);
 
   const audioRef = useRef<SpatialAudioEngine | null>(null);
@@ -277,7 +299,11 @@ export function MobileWalker() {
     }
 
     // Zero-wait turnaround: immediately queue next frame if >= 30ms elapsed since previous dispatch
-    if (sessionActiveRef.current && performance.now() - lastSendAtRef.current >= 30) {
+    if (
+      sessionActiveRef.current &&
+      !videoPausedRef.current &&
+      performance.now() - lastSendAtRef.current >= 30
+    ) {
       dispatchFrameRef.current();
     }
   }, []);
@@ -340,6 +366,24 @@ export function MobileWalker() {
     }
   }, []);
 
+  const clearVideoFileSource = useCallback(() => {
+    videoFileModeRef.current = false;
+    videoPausedRef.current = false;
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.removeAttribute('src');
+      videoRef.current.load();
+    }
+    if (videoObjectUrlRef.current) {
+      URL.revokeObjectURL(videoObjectUrlRef.current);
+      videoObjectUrlRef.current = null;
+    }
+    setVideoFileName(null);
+    setVideoPaused(false);
+    setVideoDuration(0);
+    setVideoCurrentTime(0);
+  }, []);
+
   const stopSession = useCallback(() => {
     sessionIdRef.current += 1;
     sessionActiveRef.current = false;
@@ -362,6 +406,7 @@ export function MobileWalker() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    clearVideoFileSource();
     if (wakeLockRef.current) {
       void wakeLockRef.current.release().catch(() => {});
       wakeLockRef.current = null;
@@ -376,7 +421,7 @@ export function MobileWalker() {
     setSignalLost(false);
     setGuidance(null);
     setMemorySnap(null);
-  }, [cancelFrameLoop]);
+  }, [cancelFrameLoop, clearVideoFileSource]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -442,14 +487,15 @@ export function MobileWalker() {
     };
   }, []);
 
-  const dispatchFrame = useCallback(() => {
+  const dispatchFrame = useCallback((force = false) => {
     if (!sessionActiveRef.current || switchingCameraRef.current) return;
     const video = videoRef.current;
     if (!video || video.readyState < 2) return;
+    if (videoFileModeRef.current && videoPausedRef.current && !force) return;
 
     const now = performance.now();
     if (encodingRef.current) return;
-    if (inFlightRef.current && now - lastSendAtRef.current < 520) return;
+    if (!force && inFlightRef.current && now - lastSendAtRef.current < 520) return;
 
     const vw = video.videoWidth || 480;
     const vh = video.videoHeight || 640;
@@ -526,6 +572,9 @@ export function MobileWalker() {
         setWsConnected(true);
         setErrorMsg(null);
         lastValidFrameAtRef.current = performance.now();
+        if (videoFileModeRef.current) {
+          dispatchFrameRef.current(true);
+        }
       };
 
       ws.onmessage = (event) => {
@@ -572,6 +621,7 @@ export function MobileWalker() {
     const activeSessionId = ++sessionIdRef.current;
 
     try {
+      clearVideoFileSource();
       if (videoRef.current) {
         videoRef.current.srcObject = null;
       }
@@ -622,8 +672,91 @@ export function MobileWalker() {
     }, 350);
   };
 
+  const startVideoReplay = async (file: File) => {
+    stopSession();
+    setErrorMsg(null);
+    hapticsRef.current?.triggerTapFeedback();
+    audioRef.current?.unlock();
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    const objectUrl = URL.createObjectURL(file);
+    videoObjectUrlRef.current = objectUrl;
+    videoFileModeRef.current = true;
+    videoPausedRef.current = false;
+    setVideoFileName(file.name);
+    setVideoPaused(false);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+    setDevOpen(true);
+
+    try {
+      video.srcObject = null;
+      video.src = objectUrl;
+      video.loop = videoLoop;
+      video.playbackRate = videoRate;
+      await video.play();
+    } catch (err) {
+      clearVideoFileSource();
+      setErrorMsg(
+        `Unable to play video (${err instanceof Error ? err.message : 'unsupported codec'}). Try MP4 (H.264) or MOV.`
+      );
+      return;
+    }
+
+    await acquireWakeLock();
+    audioRef.current?.resetSessionState();
+    hapticsRef.current?.resetSessionState();
+    memoryRef.current?.reset();
+    sessionActiveRef.current = true;
+    lastValidFrameAtRef.current = performance.now();
+    setStreaming(true);
+
+    connectWebSocket(0);
+    startFrameLoop();
+
+    watchdogRef.current = window.setInterval(() => {
+      if (!sessionActiveRef.current) return;
+      const v = videoRef.current;
+      if (videoFileModeRef.current && (!v || v.paused || v.ended || videoPausedRef.current)) {
+        lastValidFrameAtRef.current = performance.now();
+        return;
+      }
+      const graceMs = Math.max(3600, Math.min(8500, smoothedRttRef.current * 3.5));
+      if (performance.now() - lastValidFrameAtRef.current > graceMs) {
+        setSignalLost(true);
+      }
+    }, 350);
+  };
+
+  const toggleVideoPlayback = async () => {
+    const video = videoRef.current;
+    if (!video || !videoFileModeRef.current) return;
+    if (video.paused) {
+      videoPausedRef.current = false;
+      setVideoPaused(false);
+      lastValidFrameAtRef.current = performance.now();
+      await video.play().catch(() => {});
+      dispatchFrame(true);
+    } else {
+      video.pause();
+      videoPausedRef.current = true;
+      setVideoPaused(true);
+      // Send one clean frame of the paused moment so Mission Control & banner lock onto it
+      dispatchFrame(true);
+    }
+  };
+
+  const seekVideoTo = (nextTime: number) => {
+    const video = videoRef.current;
+    if (!video || !videoFileModeRef.current) return;
+    video.currentTime = Math.max(0, Math.min(video.duration || 0, nextTime));
+    setVideoCurrentTime(video.currentTime);
+  };
+
   const handleSwitchCamera = async () => {
-    if (eyesFreeLock || switchingCameraRef.current) return;
+    if (eyesFreeLock || switchingCameraRef.current || videoFileModeRef.current) return;
     hapticsRef.current?.triggerTapFeedback();
     const targetMode = getOppositeFacingMode(facingMode);
 
@@ -689,20 +822,27 @@ export function MobileWalker() {
     setCaptureNotice('Saving snapshot...');
     try {
       let image_b64: string | undefined;
-      if (videoRef.current) {
+      let captureNote = `Phone field capture (${label.replace('_', ' ')})`;
+      if (videoRef.current && videoRef.current.readyState >= 2) {
         const v = videoRef.current;
+        const vw = v.videoWidth || 320;
+        const vh = v.videoHeight || 240;
+        const snapScale = Math.min(1, 640 / Math.max(vw, vh));
         const snapCanvas = document.createElement('canvas');
-        snapCanvas.width = v.videoWidth || 320;
-        snapCanvas.height = v.videoHeight || 240;
+        snapCanvas.width = Math.max(160, Math.round(vw * snapScale));
+        snapCanvas.height = Math.max(120, Math.round(vh * snapScale));
         snapCanvas.getContext('2d')?.drawImage(v, 0, 0, snapCanvas.width, snapCanvas.height);
-        image_b64 = snapCanvas.toDataURL('image/jpeg', 0.8);
+        image_b64 = snapCanvas.toDataURL('image/jpeg', 0.82);
+        if (videoFileModeRef.current) {
+          captureNote = `Classroom video @ ${formatVideoTime(v.currentTime)} (${label.replace('_', ' ')})`;
+        }
       }
       const res = await fetch('/api/samples', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           label,
-          note: `Phone field capture (${label.replace('_', ' ')})`,
+          note: captureNote,
           image_b64,
         }),
       });
@@ -869,12 +1009,12 @@ export function MobileWalker() {
 
         <button
           type="button"
-          aria-disabled={eyesFreeLock || switchingCamera || undefined}
+          aria-disabled={eyesFreeLock || switchingCamera || Boolean(videoFileName) || undefined}
           aria-busy={switchingCamera || undefined}
           aria-label={`Camera: ${cameraLabel}, switch to ${nextCameraLabel.toLowerCase()}`}
           onClick={() => void handleSwitchCamera()}
           className={`flex items-center justify-center gap-1.5 rounded-2xl border px-3.5 py-4 text-xs font-bold transition ${
-            eyesFreeLock || switchingCamera
+            eyesFreeLock || switchingCamera || Boolean(videoFileName)
               ? 'border-slate-700 bg-slate-900 text-slate-400 opacity-55'
               : 'border-slate-700 bg-slate-800 text-slate-100 hover:border-sky-400 hover:bg-slate-700'
           }`}
@@ -1173,6 +1313,30 @@ export function MobileWalker() {
             autoPlay
             playsInline
             muted
+            loop={videoFileName ? videoLoop : undefined}
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget;
+              if (videoFileModeRef.current) {
+                setVideoDuration(Number.isFinite(v.duration) ? v.duration : 0);
+                v.playbackRate = videoRate;
+              }
+            }}
+            onTimeUpdate={(e) => {
+              if (videoFileModeRef.current) {
+                setVideoCurrentTime(e.currentTarget.currentTime);
+              }
+            }}
+            onSeeked={() => {
+              if (videoFileModeRef.current) {
+                dispatchFrame(true);
+              }
+            }}
+            onEnded={() => {
+              if (videoFileModeRef.current && !videoLoop) {
+                videoPausedRef.current = true;
+                setVideoPaused(true);
+              }
+            }}
             className={`w-full bg-black object-contain ${
               videoAspect === 'portrait' ? 'aspect-[3/4] max-h-72' : 'aspect-[4/3]'
             }`}
@@ -1180,11 +1344,75 @@ export function MobileWalker() {
           <canvas ref={canvasRef} className="hidden" />
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
             <span className="truncate">
-              Lens: {cameraDeviceLabel ?? cameraLabel}
+              {videoFileName ? `Video: ${videoFileName}` : `Lens: ${cameraDeviceLabel ?? cameraLabel}`}
             </span>
             <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
             <span>RTT: {rttMs} ms</span>
           </div>
+          {videoFileName && (
+            <div className="flex flex-col gap-2 border-t border-slate-800 bg-slate-950/80 px-3 py-2.5 text-xs">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void toggleVideoPlayback()}
+                  className="inline-flex items-center gap-1 rounded-lg bg-sky-500 px-2.5 py-1.5 font-bold text-slate-950 hover:bg-sky-400"
+                >
+                  {videoPaused ? (
+                    <>
+                      <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                      Play
+                    </>
+                  ) : (
+                    <>
+                      <Pause className="h-3.5 w-3.5" aria-hidden="true" />
+                      Pause
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextRate = videoRate === 1 ? 0.5 : 1;
+                    setVideoRate(nextRate);
+                    if (videoRef.current) videoRef.current.playbackRate = nextRate;
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 font-mono font-semibold text-slate-200 hover:border-sky-400"
+                >
+                  {videoRate}x
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={videoLoop}
+                  onClick={() => {
+                    const nextLoop = !videoLoop;
+                    setVideoLoop(nextLoop);
+                    if (videoRef.current) videoRef.current.loop = nextLoop;
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 font-semibold ${
+                    videoLoop
+                      ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
+                      : 'border-slate-700 bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  Loop
+                </button>
+                <span className="ml-auto font-mono text-[11px] text-slate-300">
+                  {formatVideoTime(videoCurrentTime)} / {formatVideoTime(videoDuration)}
+                </span>
+              </div>
+              <input
+                type="range"
+                aria-label="Test video timeline"
+                min={0}
+                max={videoDuration || 1}
+                step={0.1}
+                value={Math.min(videoCurrentTime, videoDuration || 1)}
+                onChange={(e) => seekVideoTo(parseFloat(e.target.value))}
+                className="w-full accent-sky-400"
+              />
+            </div>
+          )}
         </div>
         <BirdEyeRadar guidance={guidance} memory={memorySnap} />
       </div>
@@ -1199,7 +1427,7 @@ export function MobileWalker() {
         >
           <span className="flex items-center gap-1.5">
             <Save className="h-4 w-4 text-sky-400" aria-hidden="true" />
-            Developer Dataset Capture
+            Developer Video Replay &amp; Dataset Capture
           </span>
           {devOpen ? (
             <ChevronUp className="h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -1215,22 +1443,49 @@ export function MobileWalker() {
         )}
 
         {devOpen && (
-          <div className="mt-2.5">
-            <p className="mb-2.5 text-xs text-slate-400">
-              Tap a ground-truth label while streaming to save the current hallway
-              frame into the Benchmark Lab dataset.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {QUICK_LABELS.map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={() => void quickCapture(item.label)}
-                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-sky-400 hover:bg-slate-700"
-                >
-                  + {item.text}
-                </button>
-              ))}
+          <div className="mt-2.5 space-y-3">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/70 p-2.5">
+              <input
+                ref={videoFileInputRef}
+                type="file"
+                accept="video/*"
+                className="visually-hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.currentTarget.value = '';
+                  if (file) void startVideoReplay(file);
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => videoFileInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-400"
+              >
+                <Film className="h-4 w-4" aria-hidden="true" />
+                Load Test Video (.mp4 / .mov)
+              </button>
+              <span className="text-[11px] text-slate-400">
+                Streams locally via Blob URL (zero upload) through the live depth + YOLO pipeline.
+              </span>
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs text-slate-400">
+                Pause on any classroom obstacle or tap while streaming to save a labeled
+                snapshot into the Benchmark Lab dataset.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {QUICK_LABELS.map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={() => void quickCapture(item.label)}
+                    className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-sky-400 hover:bg-slate-700"
+                  >
+                    + {item.text}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}
