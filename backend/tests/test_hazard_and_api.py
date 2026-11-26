@@ -424,3 +424,28 @@ def test_classroom_video_regression_fixes() -> None:
     )
     codes = {item["code"] for item in diag["findings"]}
     assert "CUE_CONTRADICTION" in codes
+
+
+def test_ci_baked_classroom_photos_and_71s_walk_replay() -> None:
+    """Fast GPU-free CI regression gate across 20 real classroom photos + full 71s classroom walk."""
+    from pathlib import Path
+    from backend.evaluation.trace_replay import replay_real_photos_trace, replay_trace
+
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    photo_rep = replay_real_photos_trace(
+        fixtures / "real_photos_trace.npz",
+        fixtures / "real_photos_meta.json",
+    )
+    assert photo_rep["sample_count"] >= 20
+    assert photo_rep["smart"]["f1"] >= 0.75
+    assert photo_rep["smart"]["f1"] > photo_rep["naive"]["f1"]
+
+    walk_rep = replay_trace(
+        fixtures / "classroom_walk_trace.npz",
+        fixtures / "classroom_walk_meta.json",
+    )
+    assert walk_rep["processed_frames"] >= 300
+    assert walk_rep["invariant_violations"] == []
+    assert walk_rep["diagnostics"]["health_score"] >= 60
+    assert walk_rep["passed"] is True
+    assert all(sc["passed"] for sc in walk_rep["scenarios"])

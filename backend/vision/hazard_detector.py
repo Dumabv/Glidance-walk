@@ -871,8 +871,9 @@ def fuse_yolo_with_verified_hazard(
     )
     overhead_hazard = haz.overhead_hazard and not has_close_person
 
-    # Re-run Lean-4 verified decision core whenever YOLO upgrades severity or suppresses a false curb
-    if upgraded and not overhead_hazard and not haz.wall_override:
+    # Re-run Lean-4 verified decision core whenever YOLO upgrades severity or suppresses a false curb.
+    # ALWAYS re-run even on wall_override so overall_severity == max(L,C,R,curb) & never-steer-into-danger hold!
+    if upgraded:
         ov_code, act_code = decide_guidance_verified(
             _SEV_TO_CODE[left_z.severity],
             int(round(left_z.obstacle_score * 1000)),
@@ -884,7 +885,12 @@ def fuse_yolo_with_verified_hazard(
             True,
         )
         overall_sev = SEVERITY_BY_CODE[ov_code]
-        steering = STEERING_BY_CODE[act_code]
+        if not overhead_hazard:
+            steering = STEERING_BY_CODE[act_code]
+        elif act_code == 3:
+            steering = "STOP"
+            if spoken == "Path clear.":
+                spoken = CUE_BY_CODE[14]
 
     # Enrich spoken_cue with the nearest named object and GUARANTEE non-CLEAR steering never says "Path clear."
     spoken = haz.spoken_cue
@@ -923,101 +929,6 @@ def fuse_yolo_with_verified_hazard(
         right=right_z,
         curb=curb,
         overhead_hazard=overhead_hazard,
-    )
-
-
-def fuse_close_range_metric_depth(
-    haz: HazardResult,
-    depth_meters: np.ndarray,
-    pitch_deg: float = 0.0,
-    config: CalibrationConfig | None = None,
-) -> HazardResult:
-    """Escalates close-range mid-body obstacles (e.g., desks/walls at <=1.15m) using metric depth.
-
-    Ignores steep downward tilts (`0 < pitch_deg < 50`) so shoes and near floor never false-alarm,
-    and preserves Lean 4 safety invariants via `decide_guidance_verified`.
-    """
-    if haz.lens_blocked or haz.curb.detected or haz.wall_override:
-        return haz
-    if pitch_deg != 0.0 and 0.0 < pitch_deg < 50.0:
-        return haz
-
-    cfg = config or CalibrationConfig()
-    h, w = depth_meters.shape[:2]
-    if h < 16 or w < 16:
-        return haz
-
-    y1 = int(h * 0.22)
-    y2 = int(h * 0.68)
-    x1 = w // 3
-    x2 = (2 * w) // 3
-    bands: tuple[tuple[Corridor, np.ndarray], ...] = (
-        ("left", depth_meters[y1:y2, 0:x1]),
-        ("center", depth_meters[y1:y2, x1:x2]),
-        ("right", depth_meters[y1:y2, x2:w]),
-    )
-
-    zones: dict[Corridor, ZoneMetrics] = {
-        "left": haz.left,
-        "center": haz.center,
-        "right": haz.right,
-    }
-    upgraded = False
-    for side, patch in bands:
-        if patch.size == 0:
-            continue
-        q20_m = float(np.percentile(patch, 20.0))
-        if not np.isfinite(q20_m):
-            continue
-        z = zones[side]
-        target_sev: Severity = z.severity
-        new_score = z.obstacle_score
-        if q20_m <= 1.15:
-            target_sev = "danger"
-            new_score = max(new_score, min(1.0, cfg.danger_threshold + 0.14))
-        elif q20_m <= 1.75 and _SEV_TO_CODE[z.severity] < 1:
-            target_sev = "caution"
-            new_score = max(new_score, min(1.0, cfg.caution_threshold + 0.06))
-
-        if _SEV_TO_CODE[target_sev] > _SEV_TO_CODE[z.severity] or q20_m < z.min_distance_m:
-            if _SEV_TO_CODE[target_sev] > _SEV_TO_CODE[z.severity]:
-                upgraded = True
-            zones[side] = ZoneMetrics(
-                severity=target_sev,
-                obstacle_score=round(new_score, 4),
-                min_distance_m=round(min(z.min_distance_m, max(0.25, q20_m)), 2),
-                coverage_ratio=z.coverage_ratio,
-            )
-
-    if not upgraded:
-        return haz
-
-    left_z, center_z, right_z = zones["left"], zones["center"], zones["right"]
-    ov_code, act_code = decide_guidance_verified(
-        _SEV_TO_CODE[left_z.severity],
-        int(round(left_z.obstacle_score * 1000)),
-        _SEV_TO_CODE[center_z.severity],
-        int(round(center_z.obstacle_score * 1000)),
-        _SEV_TO_CODE[right_z.severity],
-        int(round(right_z.obstacle_score * 1000)),
-        haz.curb.detected,
-        True,
-    )
-    overall_sev = SEVERITY_BY_CODE[ov_code]
-    steering = STEERING_BY_CODE[act_code]
-    cue_map = {0: 0, 1: 3, 2: 4, 3: 5, 4: 1}
-    spoken = haz.spoken_cue
-    if steering != haz.steering or spoken == "Path clear.":
-        spoken = CUE_BY_CODE[cue_map[act_code]]
-
-    return replace(
-        haz,
-        overall_severity=overall_sev,
-        steering=steering,
-        spoken_cue=spoken,
-        left=left_z,
-        center=center_z,
-        right=right_z,
     )
 
 
@@ -1095,7 +1006,9 @@ def fuse_close_range_metric_depth(
     steering = haz.steering
     spoken = haz.spoken_cue
 
-    if upgraded and not haz.overhead_hazard and not haz.wall_override:
+    # Always re-run Lean-4 verified decision core whenever any corridor severity escalated
+    # so `overall_severity == max(L,C,R,curb)` and `never-steer-into-danger` hold even on wall_override.
+    if upgraded:
         ov_code, act_code = decide_guidance_verified(
             _SEV_TO_CODE[left_z.severity],
             int(round(left_z.obstacle_score * 1000)),
@@ -1107,16 +1020,21 @@ def fuse_close_range_metric_depth(
             True,
         )
         overall_sev = SEVERITY_BY_CODE[ov_code]
-        steering = STEERING_BY_CODE[act_code]
-        if not haz.curb.detected:
-            if steering == "STOP":
-                spoken = f"Close obstacle at {center_z.min_distance_m:.1f}m. Stop."
-            elif steering == "VEER_LEFT":
-                d_obs = min(center_z.min_distance_m, right_z.min_distance_m)
-                spoken = f"Close obstacle at {d_obs:.1f}m. Step left."
-            elif steering == "VEER_RIGHT":
-                d_obs = min(center_z.min_distance_m, left_z.min_distance_m)
-                spoken = f"Close obstacle at {d_obs:.1f}m. Step right."
+        if not haz.overhead_hazard:
+            steering = STEERING_BY_CODE[act_code]
+            if not haz.curb.detected:
+                if steering == "STOP":
+                    spoken = f"Close obstacle at {center_z.min_distance_m:.1f}m. Stop."
+                elif steering == "VEER_LEFT":
+                    d_obs = min(center_z.min_distance_m, right_z.min_distance_m)
+                    spoken = f"Close obstacle at {d_obs:.1f}m. Step left."
+                elif steering == "VEER_RIGHT":
+                    d_obs = min(center_z.min_distance_m, left_z.min_distance_m)
+                    spoken = f"Close obstacle at {d_obs:.1f}m. Step right."
+        elif act_code == 3:
+            steering = "STOP"
+            if spoken == "Path clear.":
+                spoken = CUE_BY_CODE[14]
 
     return replace(
         haz,
