@@ -394,13 +394,16 @@ class DepthEngine:
         """O(N) Rust SIMD 256-bin histogram `[p2, p98]` normalizer (eliminates O(N log N) sort!)."""
         if self._is_metric_model:
             safe_d = np.nan_to_num(depth_np, nan=0.35, posinf=6.0, neginf=0.35)
-            z = np.clip(safe_d, 0.35, 6.0)
+            z = np.clip(safe_d, 0.50, 6.0)
             inv_z = 1.0 / z
-            inv_near, inv_far = 1.0 / 0.35, 1.0 / 5.0
+            inv_near, inv_far = 1.0 / 0.50, 1.0 / 5.0
             closeness = np.clip((inv_z - inv_far) / (inv_near - inv_far), 0.0, 1.0).astype(
                 np.float32
             )
-            return closeness, 600
+            sub = closeness[::2, ::2]
+            p2, p98 = [float(x) for x in np.percentile(sub, [2.0, 98.0])]
+            spread_milli = int(np.clip((p98 - p2) * 1000.0, 0.0, 1000.0))
+            return closeness, spread_milli
 
         arr = np.ascontiguousarray(depth_np, dtype=np.float32)
         if _RUST_NORM_DEPTH is not None:

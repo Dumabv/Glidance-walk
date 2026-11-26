@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import sys
 import threading
@@ -12,7 +12,9 @@ import numpy as np
 
 from backend.schemas import (
     CalibrationConfig,
+    Corridor,
     CurbMetrics,
+    DetectedObject,
     Severity,
     SteeringAction,
     ZoneMetrics,
@@ -253,6 +255,9 @@ class GroundAwareHazardDetector:
         self._c_state_ref = ctypes.byref(self._c_state)
         self._c_out_ref = ctypes.byref(self._c_out)
         self.kernel_backend = "rust-simd" if _RUST_ANALYZE_FN is not None else "numpy-verified"
+        self._yolo_alert_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
+        self._yolo_danger_streak: dict[Corridor, int] = {"left": 0, "center": 0, "right": 0}
+        self._last_steer: SteeringAction = "CLEAR"
 
     @staticmethod
     def _to_c_config(cfg: CalibrationConfig) -> _CCalibrationConfig:
@@ -277,6 +282,111 @@ class GroundAwareHazardDetector:
         with self._lock:
             self._c_state = _CDetectorState()
             self._c_state_ref = ctypes.byref(self._c_state)
+            self._yolo_alert_streak = {"left": 0, "center": 0, "right": 0}
+            self._yolo_danger_streak = {"left": 0, "center": 0, "right": 0}
+            self._last_steer = "CLEAR"
+
+    def fuse_objects(
+        self,
+        haz: HazardResult,
+        objects: list[DetectedObject],
+        *,
+        stateful: bool = True,
+    ) -> HazardResult:
+        """Applies YOLOv8n fusion plus stateful temporal debounce & directional hysteresis."""
+        if not stateful:
+            return fuse_yolo_with_verified_hazard(haz, objects, self.config)
+
+        base_sevs: dict[Corridor, Severity] = {
+            "left": haz.left.severity,
+            "center": haz.center.severity,
+            "right": haz.right.severity,
+        }
+
+        # Filter YOLO alert & danger spikes through `confirm_frames` debounce so 1-frame flickers don't nag
+        stabilized_objs: list[DetectedObject] = []
+        seen_alert: set[Corridor] = set()
+        seen_danger: set[Corridor] = set()
+        for obj in objects:
+            if obj.confidence >= 0.40 and obj.severity != "clear":
+                seen_alert.add(obj.corridor)
+                if obj.severity == "danger":
+                    seen_danger.add(obj.corridor)
+
+        with self._lock:
+            confirm_n = max(1, int(self.config.confirm_frames))
+            for side in ("left", "center", "right"):
+                if side in seen_alert or base_sevs[side] != "clear":
+                    self._yolo_alert_streak[side] += 1
+                else:
+                    self._yolo_alert_streak[side] = 0
+                if side in seen_danger or base_sevs[side] == "danger":
+                    self._yolo_danger_streak[side] += 1
+                else:
+                    self._yolo_danger_streak[side] = 0
+            alert_streaks = dict(self._yolo_alert_streak)
+            danger_streaks = dict(self._yolo_danger_streak)
+
+        for obj in objects:
+            if (
+                obj.severity == "caution"
+                and base_sevs[obj.corridor] == "clear"
+                and alert_streaks[obj.corridor] < confirm_n
+            ):
+                continue
+            if (
+                obj.severity == "danger"
+                and base_sevs[obj.corridor] != "danger"
+                and danger_streaks[obj.corridor] < confirm_n
+            ):
+                stabilized_objs.append(obj.model_copy(update={"severity": "caution"}))
+            else:
+                stabilized_objs.append(obj)
+
+        fused = fuse_yolo_with_verified_hazard(haz, stabilized_objs, self.config)
+        if fused.curb.detected and _has_foreground_object_on_curb(objects):
+            # Suppress false curb even if the foreground chair/person was debounced on frame 1
+            fused = fuse_yolo_with_verified_hazard(
+                replace(
+                    haz,
+                    curb=haz.curb.model_copy(
+                        update={"detected": False, "stairs_likely": False, "confidence": 0.0}
+                    ),
+                ),
+                stabilized_objs,
+                self.config,
+            )
+
+        # Directional hysteresis: prevent rapid VEER_LEFT <-> VEER_RIGHT ping-pong when both sides are safe.
+        # Strictly preserves Lean 4 "Never Steer Into Danger" (never holds a direction whose corridor is `danger`).
+        with self._lock:
+            prev_steer = self._last_steer
+            steering = fused.steering
+            spoken = fused.spoken_cue
+            if (
+                prev_steer in ("VEER_LEFT", "VEER_RIGHT")
+                and steering in ("VEER_LEFT", "VEER_RIGHT")
+                and prev_steer != steering
+            ):
+                prev_z = fused.left if prev_steer == "VEER_LEFT" else fused.right
+                new_z = fused.left if steering == "VEER_LEFT" else fused.right
+                prev_code = _SEV_TO_CODE[prev_z.severity]
+                new_code = _SEV_TO_CODE[new_z.severity]
+                if (
+                    prev_code < 2
+                    and prev_code <= new_code
+                    and (prev_z.obstacle_score - new_z.obstacle_score) < 0.18
+                ):
+                    steering = prev_steer
+                    if steering == "VEER_LEFT":
+                        spoken = spoken.replace("Step right.", "Step left.").replace("Move right.", "Move left.")
+                    else:
+                        spoken = spoken.replace("Step left.", "Step right.").replace("Move left.", "Move right.")
+            self._last_steer = steering
+
+        if steering != fused.steering or spoken != fused.spoken_cue:
+            return replace(fused, steering=steering, spoken_cue=spoken)
+        return fused
 
     def analyze(
         self,
@@ -665,3 +775,355 @@ class GroundAwareHazardDetector:
             wall_override=wall_ov_any,
             overhead_hazard=overhead_hazard,
         )
+
+
+_SEV_TO_CODE: dict[Severity, int] = {"clear": 0, "caution": 1, "danger": 2}
+_FOREGROUND_VERTICAL_OBJECTS = {
+    "person",
+    "chair",
+    "couch",
+    "dining table",
+    "backpack",
+    "suitcase",
+    "bench",
+    "potted plant",
+    "bed",
+    "refrigerator",
+}
+
+
+def _has_foreground_object_on_curb(objects: list[DetectedObject]) -> bool:
+    """Detects a close vertical foreground obstacle (chair/person/table) that can mimic a curb edge."""
+    for obj in objects:
+        if obj.confidence < 0.40 or obj.label not in _FOREGROUND_VERTICAL_OBJECTS:
+            continue
+        if obj.distance_m > 2.2:
+            continue
+        bx1, by1, bx2, by2 = obj.bbox_norm
+        area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        if by2 >= 0.62 and area >= 0.08:
+            return True
+    return False
+
+
+def fuse_yolo_with_verified_hazard(
+    haz: HazardResult,
+    objects: list[DetectedObject],
+    config: CalibrationConfig,
+) -> HazardResult:
+    """Enriches corridor distances & spoken cues with YOLOv8n while preserving Lean 4 invariants."""
+    if not objects or haz.lens_blocked:
+        return haz
+
+    curb = haz.curb
+    curb_suppressed = False
+    if curb.detected and _has_foreground_object_on_curb(objects):
+        curb = curb.model_copy(update={"detected": False, "stairs_likely": False, "confidence": 0.0})
+        curb_suppressed = True
+
+    nearest_by_corridor: dict[Corridor, DetectedObject] = {}
+    for obj in objects:
+        if obj.confidence < 0.40 or obj.severity == "clear":
+            continue
+        cur = nearest_by_corridor.get(obj.corridor)
+        if cur is None or obj.distance_m < cur.distance_m:
+            nearest_by_corridor[obj.corridor] = obj
+
+    if not nearest_by_corridor and not curb_suppressed:
+        return haz
+
+    zones: dict[Corridor, ZoneMetrics] = {
+        "left": haz.left,
+        "center": haz.center,
+        "right": haz.right,
+    }
+    upgraded = curb_suppressed
+    for side, obj in nearest_by_corridor.items():
+        z = zones[side]
+        new_dist = round(min(z.min_distance_m, obj.distance_m), 2)
+        new_sev = z.severity
+        new_score = z.obstacle_score
+        if _SEV_TO_CODE[obj.severity] > _SEV_TO_CODE[z.severity]:
+            new_sev = obj.severity
+            upgraded = True
+            if obj.severity == "danger":
+                new_score = max(new_score, min(1.0, config.danger_threshold + 0.14))
+            elif obj.severity == "caution":
+                new_score = max(new_score, min(1.0, config.caution_threshold + 0.06))
+        zones[side] = ZoneMetrics(
+            severity=new_sev,
+            obstacle_score=round(new_score, 4),
+            min_distance_m=new_dist,
+            coverage_ratio=z.coverage_ratio,
+        )
+
+    left_z, center_z, right_z = zones["left"], zones["center"], zones["right"]
+    overall_sev = haz.overall_severity
+    steering = haz.steering
+
+    # A full-body close person (<= 1.25m) filling the frame is a front barrier, not a hanging overhang.
+    c_obj = nearest_by_corridor.get("center")
+    l_obj = nearest_by_corridor.get("left")
+    r_obj = nearest_by_corridor.get("right")
+    has_close_person = any(
+        o.confidence >= 0.40 and o.label == "person" and o.distance_m <= 1.25
+        for o in objects
+    )
+    overhead_hazard = haz.overhead_hazard and not has_close_person
+
+    # Re-run Lean-4 verified decision core whenever YOLO upgrades severity or suppresses a false curb
+    if upgraded and not overhead_hazard and not haz.wall_override:
+        ov_code, act_code = decide_guidance_verified(
+            _SEV_TO_CODE[left_z.severity],
+            int(round(left_z.obstacle_score * 1000)),
+            _SEV_TO_CODE[center_z.severity],
+            int(round(center_z.obstacle_score * 1000)),
+            _SEV_TO_CODE[right_z.severity],
+            int(round(right_z.obstacle_score * 1000)),
+            curb.detected,
+            True,
+        )
+        overall_sev = SEVERITY_BY_CODE[ov_code]
+        steering = STEERING_BY_CODE[act_code]
+
+    # Enrich spoken_cue with the nearest named object and GUARANTEE non-CLEAR steering never says "Path clear."
+    spoken = haz.spoken_cue
+    if not curb.detected and not overhead_hazard:
+        if steering == "STOP":
+            if c_obj is not None:
+                spoken = f"{c_obj.label.capitalize()} blocking path at {c_obj.distance_m:.1f}m. Stop."
+            elif l_obj is not None and r_obj is not None:
+                spoken = f"Narrow gap between {l_obj.label} and {r_obj.label}. Stop."
+            else:
+                spoken = "Path blocked ahead. Stop."
+        elif steering == "VEER_LEFT":
+            target = c_obj or r_obj
+            if target is not None:
+                where = "ahead" if target.corridor == "center" else "on right"
+                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step left."
+            elif spoken == "Path clear." or curb_suppressed:
+                spoken = "Obstacle on right. Step left."
+        elif steering == "VEER_RIGHT":
+            target = c_obj or l_obj
+            if target is not None:
+                where = "ahead" if target.corridor == "center" else "on left"
+                spoken = f"{target.label.capitalize()} {where} ({target.distance_m:.1f}m). Step right."
+            elif spoken == "Path clear." or curb_suppressed:
+                spoken = "Obstacle on left. Step right."
+        elif steering == "CLEAR":
+            spoken = "Path clear."
+
+    return replace(
+        haz,
+        overall_severity=overall_sev,
+        steering=steering,
+        spoken_cue=spoken,
+        left=left_z,
+        center=center_z,
+        right=right_z,
+        curb=curb,
+        overhead_hazard=overhead_hazard,
+    )
+
+
+def fuse_close_range_metric_depth(
+    haz: HazardResult,
+    depth_meters: np.ndarray,
+    pitch_deg: float = 0.0,
+    config: CalibrationConfig | None = None,
+) -> HazardResult:
+    """Escalates close-range mid-body obstacles (e.g., desks/walls at <=1.15m) using metric depth.
+
+    Ignores steep downward tilts (`0 < pitch_deg < 50`) so shoes and near floor never false-alarm,
+    and preserves Lean 4 safety invariants via `decide_guidance_verified`.
+    """
+    if haz.lens_blocked or haz.curb.detected or haz.wall_override:
+        return haz
+    if pitch_deg != 0.0 and 0.0 < pitch_deg < 50.0:
+        return haz
+
+    cfg = config or CalibrationConfig()
+    h, w = depth_meters.shape[:2]
+    if h < 16 or w < 16:
+        return haz
+
+    y1 = int(h * 0.22)
+    y2 = int(h * 0.68)
+    x1 = w // 3
+    x2 = (2 * w) // 3
+    bands: tuple[tuple[Corridor, np.ndarray], ...] = (
+        ("left", depth_meters[y1:y2, 0:x1]),
+        ("center", depth_meters[y1:y2, x1:x2]),
+        ("right", depth_meters[y1:y2, x2:w]),
+    )
+
+    zones: dict[Corridor, ZoneMetrics] = {
+        "left": haz.left,
+        "center": haz.center,
+        "right": haz.right,
+    }
+    upgraded = False
+    for side, patch in bands:
+        if patch.size == 0:
+            continue
+        q20_m = float(np.percentile(patch, 20.0))
+        if not np.isfinite(q20_m):
+            continue
+        z = zones[side]
+        target_sev: Severity = z.severity
+        new_score = z.obstacle_score
+        if q20_m <= 1.15:
+            target_sev = "danger"
+            new_score = max(new_score, min(1.0, cfg.danger_threshold + 0.14))
+        elif q20_m <= 1.75 and _SEV_TO_CODE[z.severity] < 1:
+            target_sev = "caution"
+            new_score = max(new_score, min(1.0, cfg.caution_threshold + 0.06))
+
+        if _SEV_TO_CODE[target_sev] > _SEV_TO_CODE[z.severity] or q20_m < z.min_distance_m:
+            if _SEV_TO_CODE[target_sev] > _SEV_TO_CODE[z.severity]:
+                upgraded = True
+            zones[side] = ZoneMetrics(
+                severity=target_sev,
+                obstacle_score=round(new_score, 4),
+                min_distance_m=round(min(z.min_distance_m, max(0.25, q20_m)), 2),
+                coverage_ratio=z.coverage_ratio,
+            )
+
+    if not upgraded:
+        return haz
+
+    left_z, center_z, right_z = zones["left"], zones["center"], zones["right"]
+    ov_code, act_code = decide_guidance_verified(
+        _SEV_TO_CODE[left_z.severity],
+        int(round(left_z.obstacle_score * 1000)),
+        _SEV_TO_CODE[center_z.severity],
+        int(round(center_z.obstacle_score * 1000)),
+        _SEV_TO_CODE[right_z.severity],
+        int(round(right_z.obstacle_score * 1000)),
+        haz.curb.detected,
+        True,
+    )
+    overall_sev = SEVERITY_BY_CODE[ov_code]
+    steering = STEERING_BY_CODE[act_code]
+    cue_map = {0: 0, 1: 3, 2: 4, 3: 5, 4: 1}
+    spoken = haz.spoken_cue
+    if steering != haz.steering or spoken == "Path clear.":
+        spoken = CUE_BY_CODE[cue_map[act_code]]
+
+    return replace(
+        haz,
+        overall_severity=overall_sev,
+        steering=steering,
+        spoken_cue=spoken,
+        left=left_z,
+        center=center_z,
+        right=right_z,
+    )
+
+
+METRIC_CLOSE_DANGER_M = 1.05
+METRIC_CLOSE_CAUTION_M = 1.45
+
+
+def fuse_close_range_metric_depth(
+    haz: HazardResult,
+    depth_meters: np.ndarray | None,
+    pitch_deg: float,
+    config: CalibrationConfig,
+) -> HazardResult:
+    """Anchors corridor distances & close-range solid obstacles to real metric depth.
+
+    Samples the forward body-level band (`y = 24%..60%`) per corridor so flat floors below
+    do not trigger false alarms, while close desks, doors, walls, or chairs (`<= 1.05m`)
+    reliably escalate through Lean-4 verified `decide_guidance_verified`.
+    """
+    if depth_meters is None or haz.lens_blocked:
+        return haz
+
+    has_live_imu = bool(np.isfinite(pitch_deg) and abs(pitch_deg) > 1.0)
+    if has_live_imu and (pitch_deg < 50.0 or pitch_deg > 125.0):
+        return haz
+
+    h, w = depth_meters.shape
+    if h < 16 or w < 16:
+        return haz
+
+    y0 = (h * 24) // 100
+    y1 = max(y0 + 4, (h * 60) // 100)
+    x1, x2 = w // 3, (2 * w) // 3
+    corridor_slices: tuple[tuple[Corridor, int, int], ...] = (
+        ("left", 0, x1),
+        ("center", x1, x2),
+        ("right", x2, w),
+    )
+
+    zones: dict[Corridor, ZoneMetrics] = {
+        "left": haz.left,
+        "center": haz.center,
+        "right": haz.right,
+    }
+    upgraded = False
+
+    for side, sx, ex in corridor_slices:
+        patch = depth_meters[y0:y1, sx:ex]
+        if patch.size == 0:
+            continue
+        metric_dist = float(np.clip(np.percentile(patch, 20.0), 0.25, 10.0))
+        z = zones[side]
+        new_dist = round(min(z.min_distance_m, metric_dist), 2)
+        new_sev = z.severity
+        new_score = z.obstacle_score
+
+        if metric_dist <= METRIC_CLOSE_DANGER_M and _SEV_TO_CODE[z.severity] < 2:
+            new_sev = "danger"
+            new_score = max(new_score, min(1.0, config.danger_threshold + 0.16))
+            upgraded = True
+        elif metric_dist <= METRIC_CLOSE_CAUTION_M and _SEV_TO_CODE[z.severity] < 1:
+            new_sev = "caution"
+            new_score = max(new_score, min(1.0, config.caution_threshold + 0.08))
+            upgraded = True
+
+        zones[side] = ZoneMetrics(
+            severity=new_sev,
+            obstacle_score=round(new_score, 4),
+            min_distance_m=new_dist,
+            coverage_ratio=z.coverage_ratio,
+        )
+
+    left_z, center_z, right_z = zones["left"], zones["center"], zones["right"]
+    overall_sev = haz.overall_severity
+    steering = haz.steering
+    spoken = haz.spoken_cue
+
+    if upgraded and not haz.overhead_hazard and not haz.wall_override:
+        ov_code, act_code = decide_guidance_verified(
+            _SEV_TO_CODE[left_z.severity],
+            int(round(left_z.obstacle_score * 1000)),
+            _SEV_TO_CODE[center_z.severity],
+            int(round(center_z.obstacle_score * 1000)),
+            _SEV_TO_CODE[right_z.severity],
+            int(round(right_z.obstacle_score * 1000)),
+            haz.curb.detected,
+            True,
+        )
+        overall_sev = SEVERITY_BY_CODE[ov_code]
+        steering = STEERING_BY_CODE[act_code]
+        if not haz.curb.detected:
+            if steering == "STOP":
+                spoken = f"Close obstacle at {center_z.min_distance_m:.1f}m. Stop."
+            elif steering == "VEER_LEFT":
+                d_obs = min(center_z.min_distance_m, right_z.min_distance_m)
+                spoken = f"Close obstacle at {d_obs:.1f}m. Step left."
+            elif steering == "VEER_RIGHT":
+                d_obs = min(center_z.min_distance_m, left_z.min_distance_m)
+                spoken = f"Close obstacle at {d_obs:.1f}m. Step right."
+
+    return replace(
+        haz,
+        overall_severity=overall_sev,
+        steering=steering,
+        spoken_cue=spoken,
+        left=left_z,
+        center=center_z,
+        right=right_z,
+    )

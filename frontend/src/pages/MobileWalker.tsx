@@ -4,9 +4,12 @@ import {
   CameraOff,
   ChevronDown,
   ChevronUp,
-  Cpu,
+  Film,
   Lock,
+  Pause,
+  Play,
   Radio,
+  RotateCcw,
   Save,
   Smartphone,
   SwitchCamera,
@@ -24,7 +27,11 @@ import {
   switchCameraStream,
   type CameraFacingMode,
 } from '../services/camera';
-import { HapticsEngine, type HapticPulseEvent } from '../services/haptics';
+import {
+  evaluateForwardBlock,
+  HapticsEngine,
+  type HapticPulseEvent,
+} from '../services/haptics';
 import {
   SpatialAudioEngine,
   type GuidanceProfile,
@@ -33,7 +40,6 @@ import {
 import { SpatialMemoryEngine } from '../services/spatialMemory';
 import { UltrasonicBatSonar } from '../services/ultrasonicSonar';
 import type {
-  ExecutionMode,
   GuidancePayload,
   SampleLabel,
   SpatialMemorySnapshot,
@@ -90,11 +96,20 @@ const QUICK_LABELS: { label: SampleLabel; text: string }[] = [
   { label: 'curb_drop', text: 'Curb / Step' },
 ];
 
+function formatVideoTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
+  const total = Math.floor(seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function MobileWalker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoFileInputRef = useRef<HTMLInputElement | null>(null);
+  const videoObjectUrlRef = useRef<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const workerRef = useRef<Worker | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasCtxRef = useRef<CanvasRenderingContext2D | null>(null);
   const rvfcHandleRef = useRef<number | null>(null);
@@ -105,23 +120,27 @@ export function MobileWalker() {
   const sessionActiveRef = useRef(false);
   const sessionIdRef = useRef(0);
   const switchingCameraRef = useRef(false);
+  const videoFileModeRef = useRef(false);
+  const videoPausedRef = useRef(false);
   const inFlightRef = useRef(false);
   const encodingRef = useRef(false);
   const lastSendAtRef = useRef(0);
   const lastValidFrameAtRef = useRef(0);
-  const activeRuntimeRef = useRef<'ws' | 'worker'>('ws');
-  const workerReadyRef = useRef(false);
   const pitchDegRef = useRef(0);
   const rollDegRef = useRef(0);
   const iosSwitchLabelRef = useRef<HTMLLabelElement | null>(null);
 
-  const [execMode, setExecMode] = useState<ExecutionMode>('auto');
   const [streaming, setStreaming] = useState(false);
   const [facingMode, setFacingMode] = useState<CameraFacingMode>('environment');
   const [cameraDeviceLabel, setCameraDeviceLabel] = useState<string | null>(null);
   const [switchingCamera, setSwitchingCamera] = useState(false);
+  const [videoFileName, setVideoFileName] = useState<string | null>(null);
+  const [videoPaused, setVideoPaused] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoRate, setVideoRate] = useState<0.5 | 1>(1);
+  const [videoLoop, setVideoLoop] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
-  const [workerStatus, setWorkerStatus] = useState<string>('idle');
   const [signalLost, setSignalLost] = useState(false);
   const [tiltWarning, setTiltWarning] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -137,8 +156,9 @@ export function MobileWalker() {
 
   const [hapticsOn, setHapticsOn] = useState(true);
   const [sonarOn, setSonarOn] = useState(true);
-  const [voiceOn, setVoiceOn] = useState(true);
-  const [guidanceProfile, setGuidanceProfile] = useState<GuidanceProfile>('smart_calm');
+  const [voiceOn, setVoiceOn] = useState(false);
+  const [guidanceProfile, setGuidanceProfile] = useState<GuidanceProfile>('metal_detector');
+  const guidanceProfileRef = useRef<GuidanceProfile>('metal_detector');
   const [voiceLang, setVoiceLang] = useState<VoiceLang>('en');
   const [eyesFreeLock, setEyesFreeLock] = useState(false);
   const [devOpen, setDevOpen] = useState(false);
@@ -150,10 +170,8 @@ export function MobileWalker() {
   const frameTimestampsRef = useRef<number[]>([]);
   const smoothedRttRef = useRef<number>(250);
   const videoAspectRef = useRef<'portrait' | 'landscape'>('portrait');
-  const dispatchFrameRef = useRef<() => void>(() => {});
+  const dispatchFrameRef = useRef<(force?: boolean) => void>(() => {});
   const lastAnnouncedSteeringRef = useRef<string | null>(null);
-  const execModeRef = useRef<ExecutionMode>(execMode);
-  execModeRef.current = execMode;
 
   const audioRef = useRef<SpatialAudioEngine | null>(null);
   const hapticsRef = useRef<HapticsEngine | null>(null);
@@ -197,8 +215,12 @@ export function MobileWalker() {
   }, [voiceOn]);
 
   useEffect(() => {
+    guidanceProfileRef.current = guidanceProfile;
+    const isMetal =
+      guidanceProfile === 'metal_detector' || guidanceProfile === 'tactile_only';
     audioRef.current?.setProfile(guidanceProfile);
-    hapticsRef.current?.setCalmBackoff(guidanceProfile !== 'sonar_3d');
+    hapticsRef.current?.setMetalDetectorMode(isMetal);
+    hapticsRef.current?.setCalmBackoff(guidanceProfile === 'smart_calm');
   }, [guidanceProfile]);
 
   useEffect(() => {
@@ -210,9 +232,14 @@ export function MobileWalker() {
     lastValidFrameAtRef.current = performance.now();
     setSignalLost(false);
 
-    // Fuse narrow 62° frame into 360° rolling Spatial Memory (24 KB RAM, ~0.03ms CPU)
+    // Update 360° rolling Spatial Memory for BirdEyeRadar visualization;
+    // in Metal Detector / Silent Vibro mode, bypass memory suppression & 11s blind-spot
+    // vetoes so sweeping the phone radially around the body reacts in 1 frame with 0 ghosts!
     const memOut = memoryRef.current?.integrateAndFuse(raw);
-    let data = memOut ? memOut.fused : raw;
+    const activeProfile = guidanceProfileRef.current;
+    const isLiveMetalSweep =
+      activeProfile === 'metal_detector' || activeProfile === 'tactile_only';
+    let data = isLiveMetalSweep ? raw : memOut ? memOut.fused : raw;
 
     // Multimodal Sensor Fusion: Camera Depth + 20kHz Ultrasonic Bat-Sonar -> GLASS & WHITE-WALL SHIELD!
     const ultra = batReadingRef.current;
@@ -286,35 +313,14 @@ export function MobileWalker() {
     }
 
     // Zero-wait turnaround: immediately queue next frame if >= 30ms elapsed since previous dispatch
-    if (sessionActiveRef.current && performance.now() - lastSendAtRef.current >= 30) {
+    if (
+      sessionActiveRef.current &&
+      !videoPausedRef.current &&
+      performance.now() - lastSendAtRef.current >= 30
+    ) {
       dispatchFrameRef.current();
     }
   }, []);
-
-  const ensureWorker = useCallback(() => {
-    if (workerRef.current) return workerRef.current;
-    const worker = new Worker(
-      new URL('../workers/vision.worker.ts', import.meta.url),
-      { type: 'module' }
-    );
-    worker.onmessage = (evt) => {
-      const msg = evt.data;
-      if (msg?.type === 'worker_status') {
-        setWorkerStatus(`${msg.status}: ${msg.detail}`);
-        if (msg.status === 'ready') {
-          workerReadyRef.current = true;
-        }
-      } else if (msg?.type === 'guidance' && msg.guidance) {
-        handleIncomingGuidance(msg.guidance as GuidancePayload);
-      } else if (msg?.type === 'worker_error') {
-        inFlightRef.current = false;
-        setWorkerStatus(`error: ${msg.detail}`);
-      }
-    };
-    worker.postMessage({ type: 'init' });
-    workerRef.current = worker;
-    return worker;
-  }, [handleIncomingGuidance]);
 
   const acquireWakeLock = useCallback(async () => {
     try {
@@ -374,9 +380,28 @@ export function MobileWalker() {
     }
   }, []);
 
+  const clearVideoFileSource = useCallback(() => {
+    videoFileModeRef.current = false;
+    videoPausedRef.current = false;
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.removeAttribute('src');
+      videoRef.current.load();
+    }
+    if (videoObjectUrlRef.current) {
+      URL.revokeObjectURL(videoObjectUrlRef.current);
+      videoObjectUrlRef.current = null;
+    }
+    setVideoFileName(null);
+    setVideoPaused(false);
+    setVideoDuration(0);
+    setVideoCurrentTime(0);
+  }, []);
+
   const stopSession = useCallback(() => {
     sessionIdRef.current += 1;
     sessionActiveRef.current = false;
+    hapticsRef.current?.resetSessionState();
     cancelFrameLoop();
     if (watchdogRef.current !== null) {
       window.clearInterval(watchdogRef.current);
@@ -396,6 +421,7 @@ export function MobileWalker() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    clearVideoFileSource();
     if (wakeLockRef.current) {
       void wakeLockRef.current.release().catch(() => {});
       wakeLockRef.current = null;
@@ -410,7 +436,7 @@ export function MobileWalker() {
     setSignalLost(false);
     setGuidance(null);
     setMemorySnap(null);
-  }, [cancelFrameLoop]);
+  }, [cancelFrameLoop, clearVideoFileSource]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -426,8 +452,6 @@ export function MobileWalker() {
       document.removeEventListener('visibilitychange', onVisibility);
       stopSession();
       batSonarRef.current?.stop();
-      workerRef.current?.terminate();
-      workerRef.current = null;
       audioRef.current?.dispose();
     };
   }, [acquireWakeLock, stopSession]);
@@ -478,21 +502,22 @@ export function MobileWalker() {
     };
   }, []);
 
-  const dispatchFrame = useCallback(() => {
+  const dispatchFrame = useCallback((force = false) => {
     if (!sessionActiveRef.current || switchingCameraRef.current) return;
     const video = videoRef.current;
     if (!video || video.readyState < 2) return;
+    if (videoFileModeRef.current && videoPausedRef.current && !force) return;
 
     const now = performance.now();
     if (encodingRef.current) return;
-    if (inFlightRef.current && now - lastSendAtRef.current < 520) return;
+    if (!force && inFlightRef.current && now - lastSendAtRef.current < 520) return;
 
     const vw = video.videoWidth || 480;
     const vh = video.videoHeight || 640;
     const isPortrait = vh > vw;
 
     // Aspect-preserving ViT-14 aligned dimensions (eliminates 1.78x portrait squash!)
-    const maxSide = activeRuntimeRef.current === 'worker' ? 252 : 322;
+    const maxSide = 322;
     const scale = Math.min(1, maxSide / Math.max(vw, vh));
     const targetW = Math.max(112, Math.round((vw * scale) / 14) * 14);
     const targetH = Math.max(112, Math.round((vh * scale) / 14) * 14);
@@ -503,43 +528,7 @@ export function MobileWalker() {
       setVideoAspect(nextAspect);
     }
 
-    const useWorker =
-      execModeRef.current === 'on_phone' ||
-      (execModeRef.current === 'auto' && activeRuntimeRef.current === 'worker');
-
-    // Path A: 100% Standalone On-Phone Worker (`ImageBitmap` zero-JPEG transfer -> WebGPU/WASM + Rust `.wasm`)
-    if (useWorker) {
-      const worker = ensureWorker();
-      inFlightRef.current = true;
-      encodingRef.current = true;
-      lastSendAtRef.current = now;
-      const clientTs = Date.now();
-      createImageBitmap(video, {
-        resizeWidth: targetW,
-        resizeHeight: targetH,
-        resizeQuality: 'low',
-      })
-        .then((bitmap) => {
-          encodingRef.current = false;
-          worker.postMessage(
-            {
-              type: 'frame',
-              bitmap,
-              clientTs,
-              pitchDeg: pitchDegRef.current,
-              rollDeg: rollDegRef.current,
-            },
-            [bitmap]
-          );
-        })
-        .catch(() => {
-          encodingRef.current = false;
-          inFlightRef.current = false;
-        });
-      return;
-    }
-
-    // Path B: Tethered Low-Latency Binary WebSocket (`[f64 ts][f32 pitch][f32 roll] + JPEG`)
+    // Tethered Low-Latency Binary WebSocket (`[f64 ts][f32 pitch][f32 roll] + JPEG`)
     const ws = wsRef.current;
     const canvas = canvasRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !canvas) return;
@@ -583,13 +572,13 @@ export function MobileWalker() {
       'image/jpeg',
       0.68
     );
-  }, [ensureWorker]);
+  }, []);
 
   dispatchFrameRef.current = dispatchFrame;
 
   const connectWebSocket = useCallback(
     (attempt = 0) => {
-      if (!sessionActiveRef.current || execModeRef.current === 'on_phone') return;
+      if (!sessionActiveRef.current) return;
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${wsProto}//${window.location.host}/ws/phone`);
       wsRef.current = ws;
@@ -597,8 +586,10 @@ export function MobileWalker() {
       ws.onopen = () => {
         setWsConnected(true);
         setErrorMsg(null);
-        activeRuntimeRef.current = 'ws';
         lastValidFrameAtRef.current = performance.now();
+        if (videoFileModeRef.current) {
+          dispatchFrameRef.current(true);
+        }
       };
 
       ws.onmessage = (event) => {
@@ -610,21 +601,9 @@ export function MobileWalker() {
         }
       };
 
-      ws.onerror = () => {
-        if (execModeRef.current === 'auto') {
-          // Seamless hot-failover to Standalone On-Phone WebWorker + Rust `.wasm`!
-          activeRuntimeRef.current = 'worker';
-          ensureWorker();
-        }
-      };
-
       ws.onclose = () => {
         setWsConnected(false);
         if (!sessionActiveRef.current) return;
-        if (execModeRef.current === 'auto') {
-          activeRuntimeRef.current = 'worker';
-          ensureWorker();
-        }
         const delay = Math.min(2500, 300 * Math.pow(1.7, attempt));
         reconnectTimerRef.current = window.setTimeout(
           () => connectWebSocket(attempt + 1),
@@ -632,7 +611,7 @@ export function MobileWalker() {
         );
       };
     },
-    [ensureWorker, handleIncomingGuidance]
+    [handleIncomingGuidance]
   );
 
   const startSession = async () => {
@@ -657,6 +636,7 @@ export function MobileWalker() {
     const activeSessionId = ++sessionIdRef.current;
 
     try {
+      clearVideoFileSource();
       if (videoRef.current) {
         videoRef.current.srcObject = null;
       }
@@ -686,18 +666,7 @@ export function MobileWalker() {
     lastValidFrameAtRef.current = performance.now();
     setStreaming(true);
 
-    if (execMode === 'on_phone') {
-      activeRuntimeRef.current = 'worker';
-      ensureWorker();
-    } else {
-      activeRuntimeRef.current = 'ws';
-      connectWebSocket(0);
-      if (execMode === 'auto') {
-        // Warm up standalone worker in background for instant zero-drop failover
-        ensureWorker();
-      }
-    }
-
+    connectWebSocket(0);
     startFrameLoop();
 
     // Adaptive RTT-Aware Watchdog: avoids false alarms on 4G / Cloudflare tunnels while catching real stalls!
@@ -705,10 +674,7 @@ export function MobileWalker() {
       if (!sessionActiveRef.current || switchingCameraRef.current) return;
       const track = streamRef.current?.getVideoTracks()[0];
       const trackDead = !track || track.readyState === 'ended';
-      const graceMs =
-        activeRuntimeRef.current === 'worker' && !workerReadyRef.current
-          ? 14000
-          : Math.max(3600, Math.min(8500, smoothedRttRef.current * 3.5));
+      const graceMs = Math.max(3600, Math.min(8500, smoothedRttRef.current * 3.5));
       const stale = performance.now() - lastValidFrameAtRef.current > graceMs;
 
       if (trackDead || stale) {
@@ -721,8 +687,91 @@ export function MobileWalker() {
     }, 350);
   };
 
+  const startVideoReplay = async (file: File) => {
+    stopSession();
+    setErrorMsg(null);
+    hapticsRef.current?.triggerTapFeedback();
+    audioRef.current?.unlock();
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    const objectUrl = URL.createObjectURL(file);
+    videoObjectUrlRef.current = objectUrl;
+    videoFileModeRef.current = true;
+    videoPausedRef.current = false;
+    setVideoFileName(file.name);
+    setVideoPaused(false);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+    setDevOpen(true);
+
+    try {
+      video.srcObject = null;
+      video.src = objectUrl;
+      video.loop = videoLoop;
+      video.playbackRate = videoRate;
+      await video.play();
+    } catch (err) {
+      clearVideoFileSource();
+      setErrorMsg(
+        `Unable to play video (${err instanceof Error ? err.message : 'unsupported codec'}). Try MP4 (H.264) or MOV.`
+      );
+      return;
+    }
+
+    await acquireWakeLock();
+    audioRef.current?.resetSessionState();
+    hapticsRef.current?.resetSessionState();
+    memoryRef.current?.reset();
+    sessionActiveRef.current = true;
+    lastValidFrameAtRef.current = performance.now();
+    setStreaming(true);
+
+    connectWebSocket(0);
+    startFrameLoop();
+
+    watchdogRef.current = window.setInterval(() => {
+      if (!sessionActiveRef.current) return;
+      const v = videoRef.current;
+      if (videoFileModeRef.current && (!v || v.paused || v.ended || videoPausedRef.current)) {
+        lastValidFrameAtRef.current = performance.now();
+        return;
+      }
+      const graceMs = Math.max(3600, Math.min(8500, smoothedRttRef.current * 3.5));
+      if (performance.now() - lastValidFrameAtRef.current > graceMs) {
+        setSignalLost(true);
+      }
+    }, 350);
+  };
+
+  const toggleVideoPlayback = async () => {
+    const video = videoRef.current;
+    if (!video || !videoFileModeRef.current) return;
+    if (video.paused) {
+      videoPausedRef.current = false;
+      setVideoPaused(false);
+      lastValidFrameAtRef.current = performance.now();
+      await video.play().catch(() => {});
+      dispatchFrame(true);
+    } else {
+      video.pause();
+      videoPausedRef.current = true;
+      setVideoPaused(true);
+      // Send one clean frame of the paused moment so Mission Control & banner lock onto it
+      dispatchFrame(true);
+    }
+  };
+
+  const seekVideoTo = (nextTime: number) => {
+    const video = videoRef.current;
+    if (!video || !videoFileModeRef.current) return;
+    video.currentTime = Math.max(0, Math.min(video.duration || 0, nextTime));
+    setVideoCurrentTime(video.currentTime);
+  };
+
   const handleSwitchCamera = async () => {
-    if (eyesFreeLock || switchingCameraRef.current) return;
+    if (eyesFreeLock || switchingCameraRef.current || videoFileModeRef.current) return;
     hapticsRef.current?.triggerTapFeedback();
     const targetMode = getOppositeFacingMode(facingMode);
 
@@ -788,20 +837,27 @@ export function MobileWalker() {
     setCaptureNotice('Saving snapshot...');
     try {
       let image_b64: string | undefined;
-      if (videoRef.current) {
+      let captureNote = `Phone field capture (${label.replace('_', ' ')})`;
+      if (videoRef.current && videoRef.current.readyState >= 2) {
         const v = videoRef.current;
+        const vw = v.videoWidth || 320;
+        const vh = v.videoHeight || 240;
+        const snapScale = Math.min(1, 640 / Math.max(vw, vh));
         const snapCanvas = document.createElement('canvas');
-        snapCanvas.width = v.videoWidth || 320;
-        snapCanvas.height = v.videoHeight || 240;
+        snapCanvas.width = Math.max(160, Math.round(vw * snapScale));
+        snapCanvas.height = Math.max(120, Math.round(vh * snapScale));
         snapCanvas.getContext('2d')?.drawImage(v, 0, 0, snapCanvas.width, snapCanvas.height);
-        image_b64 = snapCanvas.toDataURL('image/jpeg', 0.8);
+        image_b64 = snapCanvas.toDataURL('image/jpeg', 0.82);
+        if (videoFileModeRef.current) {
+          captureNote = `Classroom video @ ${formatVideoTime(v.currentTime)} (${label.replace('_', ' ')})`;
+        }
       }
       const res = await fetch('/api/samples', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           label,
-          note: `Phone field capture (${label.replace('_', ' ')})`,
+          note: captureNote,
           image_b64,
         }),
       });
@@ -818,6 +874,11 @@ export function MobileWalker() {
     window.setTimeout(() => setCaptureNotice(null), 2600);
   };
 
+  const isMetalSweepProfile =
+    guidanceProfile === 'metal_detector' || guidanceProfile === 'tactile_only';
+  const forwardBlock =
+    streaming && !signalLost && guidance ? evaluateForwardBlock(guidance) : null;
+
   // Fail-closed visual banner state (never defaults to green `PATH CLEAR` before first frame!)
   const bannerStateKey: keyof typeof STEERING_META = !streaming
     ? 'READY'
@@ -826,7 +887,23 @@ export function MobileWalker() {
       : guidance
         ? guidance.steering
         : 'READY';
-  const meta = STEERING_META[bannerStateKey];
+  const meta =
+    isMetalSweepProfile && forwardBlock
+      ? forwardBlock.blocked
+        ? {
+            title:
+              forwardBlock.kind === 'curb'
+                ? 'STOP — STEP / CURB'
+                : `STOP — OBSTACLE ${forwardBlock.distanceM.toFixed(1)}m`,
+            bg: 'bg-red-950/95 text-red-100',
+            border: 'border-red-500',
+          }
+        : {
+            title: 'OPEN PATH — GO',
+            bg: 'bg-emerald-950/85 text-emerald-200',
+            border: 'border-emerald-500/70',
+          }
+      : STEERING_META[bannerStateKey];
   const nativeVib = hapticsRef.current.isNativeVibrationSupported();
   const cameraLabel = getCameraLabel(facingMode);
   const nextCameraLabel = getCameraLabel(getOppositeFacingMode(facingMode));
@@ -855,7 +932,7 @@ export function MobileWalker() {
         >
           <Radio className="h-3.5 w-3.5" aria-hidden="true" />
           {streaming
-            ? `${fps.toFixed(1)} FPS · ${rttMs}ms (${(guidance?.kernel_backend ?? activeRuntimeRef.current).toUpperCase()})`
+            ? `${fps.toFixed(1)} FPS · ${rttMs}ms (${(guidance?.kernel_backend ?? 'ws').toUpperCase()})`
             : 'Standby'}
         </span>
       </div>
@@ -882,52 +959,6 @@ export function MobileWalker() {
           />
         </label>
       </span>
-
-      {/* Execution Mode Selector: Auto Failover vs Tethered Server vs 100% On-Phone Standalone */}
-      <div
-        role="group"
-        aria-label="Inference execution mode"
-        className="grid grid-cols-3 gap-1.5 rounded-xl border border-slate-800 bg-slate-900/90 p-1.5 text-xs font-semibold"
-      >
-        {(
-          [
-            { id: 'auto', label: 'Auto (Failover)' },
-            { id: 'tethered', label: 'Laptop Server' },
-            { id: 'on_phone', label: 'On-Phone WASM' },
-          ] as const
-        ).map((m) => (
-          <button
-            key={m.id}
-            type="button"
-            disabled={eyesFreeLock}
-            aria-pressed={execMode === m.id}
-            onClick={() => {
-              hapticsRef.current?.triggerTapFeedback();
-              setExecMode(m.id);
-              if (m.id === 'on_phone') {
-                activeRuntimeRef.current = 'worker';
-                ensureWorker();
-              } else if (m.id === 'tethered') {
-                activeRuntimeRef.current = 'ws';
-              }
-            }}
-            className={`rounded-lg px-2 py-2 transition ${
-              execMode === m.id
-                ? 'bg-sky-500 text-slate-950 font-bold'
-                : 'text-slate-300 hover:bg-slate-800'
-            } disabled:opacity-50`}
-          >
-            {m.label}
-          </button>
-        ))}
-      </div>
-
-      {workerStatus !== 'idle' && (execMode === 'on_phone' || activeRuntimeRef.current === 'worker') && (
-        <p className="flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-950/40 px-3 py-1.5 text-xs text-sky-200">
-          <Cpu className="h-3.5 w-3.5 shrink-0 text-sky-400" aria-hidden="true" />
-          <span>{workerStatus}</span>
-        </p>
-      )}
 
       {tiltWarning && (
         <div
@@ -971,7 +1002,11 @@ export function MobileWalker() {
         <span className="mt-1 block text-sm opacity-90">
           {signalLost
             ? 'Connection or camera interrupted — stop walking.'
-            : guidance?.spoken_cue ?? 'Tap Start Walking Stream to engage rear camera.'}
+            : isMetalSweepProfile && forwardBlock
+              ? forwardBlock.blocked
+                ? `Obstacle directly ahead (${forwardBlock.distanceM.toFixed(1)}m) — sweep phone to find silence.`
+                : 'No blocking obstacle ahead — silent & clear to walk.'
+              : guidance?.spoken_cue ?? 'Tap Start Walking Stream to engage rear camera.'}
         </span>
         {!signalLost && guidance?.objects && guidance.objects.length > 0 && (
           <span className="mt-2 flex flex-wrap justify-center gap-1.5">
@@ -1014,12 +1049,12 @@ export function MobileWalker() {
 
         <button
           type="button"
-          aria-disabled={eyesFreeLock || switchingCamera || undefined}
+          aria-disabled={eyesFreeLock || switchingCamera || Boolean(videoFileName) || undefined}
           aria-busy={switchingCamera || undefined}
           aria-label={`Camera: ${cameraLabel}, switch to ${nextCameraLabel.toLowerCase()}`}
           onClick={() => void handleSwitchCamera()}
           className={`flex items-center justify-center gap-1.5 rounded-2xl border px-3.5 py-4 text-xs font-bold transition ${
-            eyesFreeLock || switchingCamera
+            eyesFreeLock || switchingCamera || Boolean(videoFileName)
               ? 'border-slate-700 bg-slate-900 text-slate-400 opacity-55'
               : 'border-slate-700 bg-slate-800 text-slate-100 hover:border-sky-400 hover:bg-slate-700'
           }`}
@@ -1061,9 +1096,9 @@ export function MobileWalker() {
       >
         {(
           [
-            { id: 'smart_calm', label: 'Smart Calm' },
-            { id: 'sonar_3d', label: '3D Radar' },
+            { id: 'metal_detector', label: 'Metal Detector' },
             { id: 'tactile_only', label: 'Silent Vibro' },
+            { id: 'smart_calm', label: 'Smart Calm' },
           ] as const
         ).map((p) => (
           <button
@@ -1318,6 +1353,30 @@ export function MobileWalker() {
             autoPlay
             playsInline
             muted
+            loop={videoFileName ? videoLoop : undefined}
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget;
+              if (videoFileModeRef.current) {
+                setVideoDuration(Number.isFinite(v.duration) ? v.duration : 0);
+                v.playbackRate = videoRate;
+              }
+            }}
+            onTimeUpdate={(e) => {
+              if (videoFileModeRef.current) {
+                setVideoCurrentTime(e.currentTarget.currentTime);
+              }
+            }}
+            onSeeked={() => {
+              if (videoFileModeRef.current) {
+                dispatchFrame(true);
+              }
+            }}
+            onEnded={() => {
+              if (videoFileModeRef.current && !videoLoop) {
+                videoPausedRef.current = true;
+                setVideoPaused(true);
+              }
+            }}
             className={`w-full bg-black object-contain ${
               videoAspect === 'portrait' ? 'aspect-[3/4] max-h-72' : 'aspect-[4/3]'
             }`}
@@ -1325,11 +1384,75 @@ export function MobileWalker() {
           <canvas ref={canvasRef} className="hidden" />
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-slate-400">
             <span className="truncate">
-              Lens: {cameraDeviceLabel ?? cameraLabel}
+              {videoFileName ? `Video: ${videoFileName}` : `Lens: ${cameraDeviceLabel ?? cameraLabel}`}
             </span>
             <span className="truncate">Pulse: {lastPulse?.patternLabel ?? 'Idle'}</span>
             <span>RTT: {rttMs} ms</span>
           </div>
+          {videoFileName && (
+            <div className="flex flex-col gap-2 border-t border-slate-800 bg-slate-950/80 px-3 py-2.5 text-xs">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void toggleVideoPlayback()}
+                  className="inline-flex items-center gap-1 rounded-lg bg-sky-500 px-2.5 py-1.5 font-bold text-slate-950 hover:bg-sky-400"
+                >
+                  {videoPaused ? (
+                    <>
+                      <Play className="h-3.5 w-3.5" aria-hidden="true" />
+                      Play
+                    </>
+                  ) : (
+                    <>
+                      <Pause className="h-3.5 w-3.5" aria-hidden="true" />
+                      Pause
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextRate = videoRate === 1 ? 0.5 : 1;
+                    setVideoRate(nextRate);
+                    if (videoRef.current) videoRef.current.playbackRate = nextRate;
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 font-mono font-semibold text-slate-200 hover:border-sky-400"
+                >
+                  {videoRate}x
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={videoLoop}
+                  onClick={() => {
+                    const nextLoop = !videoLoop;
+                    setVideoLoop(nextLoop);
+                    if (videoRef.current) videoRef.current.loop = nextLoop;
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 font-semibold ${
+                    videoLoop
+                      ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
+                      : 'border-slate-700 bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                  Loop
+                </button>
+                <span className="ml-auto font-mono text-[11px] text-slate-300">
+                  {formatVideoTime(videoCurrentTime)} / {formatVideoTime(videoDuration)}
+                </span>
+              </div>
+              <input
+                type="range"
+                aria-label="Test video timeline"
+                min={0}
+                max={videoDuration || 1}
+                step={0.1}
+                value={Math.min(videoCurrentTime, videoDuration || 1)}
+                onChange={(e) => seekVideoTo(parseFloat(e.target.value))}
+                className="w-full accent-sky-400"
+              />
+            </div>
+          )}
         </div>
         <BirdEyeRadar guidance={guidance} memory={memorySnap} />
       </div>
@@ -1344,7 +1467,7 @@ export function MobileWalker() {
         >
           <span className="flex items-center gap-1.5">
             <Save className="h-4 w-4 text-sky-400" aria-hidden="true" />
-            Developer Dataset Capture
+            Developer Video Replay &amp; Dataset Capture
           </span>
           {devOpen ? (
             <ChevronUp className="h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -1360,22 +1483,49 @@ export function MobileWalker() {
         )}
 
         {devOpen && (
-          <div className="mt-2.5">
-            <p className="mb-2.5 text-xs text-slate-400">
-              Tap a ground-truth label while streaming to save the current hallway
-              frame into the Benchmark Lab dataset.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {QUICK_LABELS.map((item) => (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={() => void quickCapture(item.label)}
-                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-sky-400 hover:bg-slate-700"
-                >
-                  + {item.text}
-                </button>
-              ))}
+          <div className="mt-2.5 space-y-3">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/70 p-2.5">
+              <input
+                ref={videoFileInputRef}
+                type="file"
+                accept="video/*"
+                className="visually-hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.currentTarget.value = '';
+                  if (file) void startVideoReplay(file);
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => videoFileInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-400"
+              >
+                <Film className="h-4 w-4" aria-hidden="true" />
+                Load Test Video (.mp4 / .mov)
+              </button>
+              <span className="text-[11px] text-slate-400">
+                Streams locally via Blob URL (zero upload) through the live depth + YOLO pipeline.
+              </span>
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs text-slate-400">
+                Pause on any classroom obstacle or tap while streaming to save a labeled
+                snapshot into the Benchmark Lab dataset.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {QUICK_LABELS.map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={() => void quickCapture(item.label)}
+                    className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-sky-400 hover:bg-slate-700"
+                  >
+                    + {item.text}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}

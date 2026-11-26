@@ -1,10 +1,10 @@
 # Glidance v2.0 — Formally Verified Phone-Camera Obstacle & Curb Navigator
 
-A real-time assistive navigation prototype powered by **`Depth-Anything-V2-Small`**, a **3-band Theil-Sen V-Disparity ground-plane & curb analyzer** written in **Rust** (`cdylib` + `wasm32-unknown-unknown`), **34 machine-checked Lean 4 safety theorems**, **3D binaural HRTF spatial sonar**, and **priority-preempting Android/iOS haptics**.
+A real-time assistive navigation prototype powered by **`Depth-Anything-V2`**, **`YOLOv8n` semantic obstacle fusion**, a **3-band Theil-Sen V-Disparity ground-plane & curb analyzer** written in **Rust** (`cdylib` + `wasm32-unknown-unknown` DSP), **34 machine-checked Lean 4 safety theorems**, **3D binaural HRTF spatial sonar**, and **priority-preempting Android/iOS haptics**.
 
-Supports **two seamless execution modes** on smartphones:
-1. **Tethered Low-Latency Mode (`wss://`):** Streams aspect-preserved frames + 16-byte IMU pitch/roll telemetry to the FastAPI backend (`CUDA/MPS FP16` or `ONNX Runtime C++ SIMD` + zero-copy `glidance_core` Rust `.dll`/`.dylib`), simultaneously driving the **Mission Control** & **Benchmark Lab** projector dashboards.
-2. **100% Standalone On-Phone Mode (`WebWorker` + `WebGPU/WASM` + `glidance_core.wasm`):** Runs `Depth-Anything-V2-Small` + the exact same 15 KB `#![no_std]` Rust safety kernel directly inside the mobile browser (zero laptop/backend required, automatic hot-failover if Wi-Fi drops!).
+Designed around a deterministic **Thin-Client + Low-Latency GPU Server** architecture:
+- **Smartphone Sensor & Tactile Client (`/?mode=mobile`):** Captures aspect-preserved camera frames + 16-byte IMU pitch/roll telemetry, runs on-device **17.5–21 kHz Ultrasonic Bat-Sonar** (`glidance_core.wasm`) and **360° Spatial Memory**, and renders priority-preempting haptics + 3D HRTF audio cues.
+- **GPU Compute & Mission Control Backend (`wss://`):** Runs `Depth-Anything-V2` (`CUDA/MPS FP16` or `ONNX Runtime C++ SIMD`) + `YOLOv8n` + zero-copy `glidance_core` Rust `.dll`/`.dylib`, returning guidance to the walker before broadcasting live heatmaps to the **Mission Control** & **Benchmark Lab** projector dashboards.
 
 > **Disclaimer:** Hallway research prototype only — not a certified medical or real-world mobility aid.
 
@@ -13,18 +13,12 @@ Supports **two seamless execution modes** on smartphones:
 ## Architecture & Data Flow
 
 ```text
-[Mode A: Tethered Mission Control]
 Phone Browser (/?mode=mobile) --[wss:// 16B (ts+pitch+roll) + Aspect JPEG]--> Vite HTTPS (:5173)
-  --> FastAPI + Depth-Anything-V2 (CUDA/MPS FP16 or ONNX Runtime INT8, ViT-14 patch-aligned)
+  --> FastAPI + Depth-Anything-V2 (CUDA/MPS FP16 or ONNX Runtime, ViT-14 patch-aligned) + YOLOv8n
   --> Zero-Copy Rust `glidance_core` (.dll/.dylib/.so, ~0.04 ms/frame)
   --> Lean-4 Verified Safety Kernel (Never-Steer-Into-Danger + Curb/Box Mutual Exclusion)
-  --> Priority Haptics + 3D HRTF Binaural Sonar on Phone + Throttled Heatmap to Projector
-
-[Mode B: Standalone On-Phone PWA / Automatic Offline Failover]
-Phone Camera --> ImageBitmap Zero-Copy Transfer --> Dedicated WebWorker (`vision.worker.ts`)
-  --> Transformers.js WebGPU FP16 / WASM INT8 (`onnx-community/depth-anything-v2-small`)
-  --> `glidance_core.wasm` (15 KB Rust WebAssembly safety kernel, ~0.08 ms/frame)
-  --> Identical `GuidancePayload` --> Priority Haptics + 3D HRTF Binaural Sonar
+  --> Immediate Guidance Reply to Phone (360° Spatial Memory + 20kHz WASM Bat-Sonar + Haptics/3D Audio)
+  --> Throttled Depth & YOLO Overlay Broadcast to Classroom Projector (`Mission Control`)
 ```
 
 ---

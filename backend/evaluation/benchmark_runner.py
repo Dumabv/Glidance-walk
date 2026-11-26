@@ -15,7 +15,12 @@ from backend.schemas import (
 )
 from backend.vision.baseline_naive import NaiveCenterThresholdDetector
 from backend.vision.depth_engine import DepthEngine
-from backend.vision.hazard_detector import GroundAwareHazardDetector, HazardResult
+from backend.vision.hazard_detector import (
+    GroundAwareHazardDetector,
+    HazardResult,
+    fuse_yolo_with_verified_hazard,
+)
+from backend.vision.object_detector import SemanticObjectDetector
 
 
 def _is_smart_direction_correct(label: SampleLabel, res: HazardResult) -> bool:
@@ -97,6 +102,7 @@ def run_benchmark(
     dataset_store: DatasetStore,
     config: CalibrationConfig,
     include_synthetic: bool = True,
+    object_detector: SemanticObjectDetector | None = None,
 ) -> BenchmarkReport:
     """Benchmarks Naive Center Threshold vs Verified Glidance Rust/V-Disparity Engine."""
     naive_detector = NaiveCenterThresholdDetector()
@@ -133,10 +139,19 @@ def run_benchmark(
             luma_mean=pred.luma_mean,
             luma_std=pred.luma_std,
         )
+        yolo_ms = 0.0
+        if (
+            object_detector is not None
+            and object_detector.is_active
+            and pred.depth_meters is not None
+        ):
+            obj_res = object_detector.detect(dec.rgb, pred.depth_meters)
+            s_res = fuse_yolo_with_verified_hazard(s_res, obj_res.objects, config)
+            yolo_ms = obj_res.yolo_ms
 
         is_haz = rec.label != "clear"
         n_total_ms = dec.decode_ms + pred.inference_ms + n_res.elapsed_ms
-        s_total_ms = dec.decode_ms + pred.inference_ms + s_res.hazard_ms
+        s_total_ms = dec.decode_ms + pred.inference_ms + yolo_ms + s_res.hazard_ms
 
         n_ok = (n_res.obstacle_detected == is_haz) and (rec.label != "curb_drop")
         s_detected = (s_res.overall_severity != "clear") or s_res.curb.detected

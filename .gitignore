@@ -15,3 +15,8 @@ frontend/dist/
 *.log
 *.pt
 backend/data/models/
+*.mp4
+*.mov
+*.webm
+*.mkv
+backend/data/videos/

@@ -1,6 +1,7 @@
 import type { GuidancePayload } from '../types/telemetry';
+import { evaluateForwardBlock } from './haptics';
 
-export type GuidanceProfile = 'smart_calm' | 'sonar_3d' | 'tactile_only';
+export type GuidanceProfile = 'metal_detector' | 'smart_calm' | 'sonar_3d' | 'tactile_only';
 export type VoiceLang = 'ru' | 'en';
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -111,9 +112,9 @@ function getCrispCallout(
 export class SpatialAudioEngine {
   private ctx: AudioContext | null = null;
   private compressor: DynamicsCompressorNode | null = null;
-  private profile: GuidanceProfile = 'smart_calm';
+  private profile: GuidanceProfile = 'metal_detector';
   private sonarEnabled = true;
-  private voiceEnabled = true;
+  private voiceEnabled = false;
   private voiceLang: VoiceLang = 'en';
 
   private lastPingAt = 0;
@@ -327,6 +328,11 @@ export class SpatialAudioEngine {
     if (this.profile === 'tactile_only') return;
 
     const now = performance.now();
+    if (this.profile === 'metal_detector') {
+      this.handleMetalDetectorAudio(guidance, now);
+      return;
+    }
+
     const isCurb = guidance.curb.detected || guidance.steering === 'CURB_DROP';
     const minDist = Math.min(
       guidance.left.min_distance_m,
@@ -468,6 +474,95 @@ export class SpatialAudioEngine {
           this.speakNow(callout.text, callout.urgent, false);
         }
       }
+    }
+  }
+
+  private handleMetalDetectorAudio(guidance: GuidancePayload, now: number): void {
+    const block = evaluateForwardBlock(guidance);
+    if (!block.blocked) {
+      this.lastRank = 0;
+      this.activeHazardKey = 'CLEAR';
+      this.lastSpokenKey = 'CLEAR';
+      return;
+    }
+
+    const rank =
+      block.kind === 'curb'
+        ? 4
+        : block.kind === 'contact'
+          ? 3
+          : block.kind === 'close'
+            ? 2
+            : 1;
+
+    if (this.sonarEnabled) {
+      const intervalMs =
+        block.kind === 'curb'
+          ? 400
+          : block.kind === 'contact'
+            ? 175
+            : block.kind === 'close'
+              ? 230
+              : 340;
+      const justEntered = this.activeHazardKey === 'CLEAR';
+      const escalated = rank > this.lastRank;
+
+      if (justEntered || escalated || now - this.lastPingAt >= intervalMs) {
+        this.lastPingAt = now;
+        this.lastRank = rank;
+        this.activeHazardKey = block.reason;
+        this.unlock();
+        if (this.ctx) {
+          const t0 = this.ctx.currentTime;
+          if (block.kind === 'curb') {
+            this.schedule3DPing({
+              startTime: t0,
+              freqStart: 680,
+              freqEnd: 260,
+              durationSec: 0.14,
+              posX: 0,
+              posY: -0.75,
+              posZ: -0.8,
+              volume: 0.2,
+              cutoffHz: 2200,
+            });
+          } else {
+            const freq =
+              block.kind === 'contact' ? 940 : block.kind === 'close' ? 740 : 540;
+            this.schedule3DPing({
+              startTime: t0,
+              freqStart: freq,
+              freqEnd: freq,
+              durationSec: block.kind === 'contact' ? 0.08 : 0.065,
+              posX: 0,
+              posY: 0,
+              posZ: -clamp(block.distanceM, 0.35, 1.5),
+              volume: block.kind === 'contact' ? 0.18 : 0.13,
+              cutoffHz: 2600,
+            });
+          }
+        }
+      }
+    } else {
+      this.activeHazardKey = block.reason;
+      this.lastRank = rank;
+    }
+
+    if (
+      this.voiceEnabled &&
+      (block.kind === 'contact' || block.kind === 'curb') &&
+      (this.lastSpokenKey !== block.kind || now - this.lastSpokenAt >= 3200)
+    ) {
+      this.lastSpokenKey = block.kind;
+      const word =
+        block.kind === 'curb'
+          ? this.voiceLang === 'ru'
+            ? 'Ступенька'
+            : 'Step down'
+          : this.voiceLang === 'ru'
+            ? 'Стоп'
+            : 'Stop';
+      this.speakNow(word, true, false);
     }
   }
 
